@@ -33,7 +33,16 @@ def normalize_storage_metadata(metadata: Any, key: str | None = None) -> dict[st
         return None
 
     custom = metadata.get("custom")
-    normalized = {**metadata, **custom} if isinstance(custom, dict) else metadata.copy()
+    normalized = metadata.copy()
+    if isinstance(custom, dict):
+        # `custom` carries the provider's view and overrides the record's, but only where it
+        # has one. An incremental update writes a `custom` block whose `last_updated`,
+        # `start_date` and `end_date` are None while the record's own are correct, and a
+        # blanket merge let those nulls win: `get_metadata` then reported `last_updated: None`
+        # for a key that had just been updated.
+        for name, value in custom.items():
+            if value is not None or normalized.get(name) is None:
+                normalized[name] = value
 
     if key is not None:
         parts = key.split("/", 2)

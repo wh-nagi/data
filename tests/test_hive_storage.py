@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from ml4t.data.storage.backend import StorageConfig
+from ml4t.data.managers.metadata_manager import MetadataManager
+from ml4t.data.storage.backend import StorageConfig, normalize_storage_metadata
 from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.keys import decode_storage_key, encode_storage_key, storage_key_path
 
@@ -749,3 +750,64 @@ class TestPartitionsAccessor:
 
         assert [part.label for part in parts] == ["2023-01", "2023-02", "2023-03"]
         assert len({part.path.parent.parent for part in parts}) == 1
+
+
+class TestNormalizeStorageMetadata:
+    """`custom` overrides the record it sits in, but a null in it is not an override."""
+
+    def test_custom_value_overrides_the_record(self):
+        normalized = normalize_storage_metadata(
+            {"provider": "record", "row_count": 10, "custom": {"provider": "yahoo"}}
+        )
+
+        assert normalized["provider"] == "yahoo"
+        assert normalized["row_count"] == 10
+
+    def test_null_in_custom_does_not_erase_the_record(self):
+        """An incremental update writes custom.last_updated=None over a correct record value."""
+        normalized = normalize_storage_metadata(
+            {
+                "last_updated": "2026-08-10T09:57:41.487386",
+                "row_count": 1316,
+                "custom": {"last_updated": None, "end_date": None, "provider": "yahoo"},
+            }
+        )
+
+        assert normalized["last_updated"] == "2026-08-10T09:57:41.487386"
+        assert normalized["provider"] == "yahoo"
+
+    def test_key_absent_from_the_record_keeps_its_null(self):
+        """Dropping the key instead would turn a reported null into a KeyError for callers."""
+        normalized = normalize_storage_metadata({"row_count": 1, "custom": {"calendar": None}})
+
+        assert "calendar" in normalized
+        assert normalized["calendar"] is None
+
+
+class TestMetadataSurvivesAnUpdate:
+    """The reader-facing symptom: `get_metadata` reported None right after `update()`."""
+
+    def test_last_updated_survives_a_provider_block_that_omits_it(self, tmp_path):
+        """`write` stamps `last_updated` itself and files the caller's dict under `custom`.
+
+        The incremental path hands it a provider block whose own `last_updated` is None,
+        which used to overwrite the stamp.
+        """
+        storage = HiveStorage(StorageConfig(base_path=tmp_path))
+        manager = MetadataManager(storage=storage)
+        key = "equities/daily/AAPL"
+        frame = pl.DataFrame(
+            {
+                "timestamp": pl.date_range(
+                    datetime(2023, 1, 1), datetime(2023, 3, 31), interval="1d", eager=True
+                ),
+            }
+        ).with_columns(close=pl.lit(1.0))
+
+        before = datetime.now()
+        storage.write(frame, key, metadata={"last_updated": None, "provider": "yahoo"})
+
+        reported = manager.get_metadata("AAPL")
+        assert reported["provider"] == "yahoo"
+        assert reported["last_updated"] is not None
+        assert datetime.fromisoformat(reported["last_updated"]) >= before
