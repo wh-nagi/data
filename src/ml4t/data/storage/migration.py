@@ -7,7 +7,7 @@ import os
 import tarfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -373,7 +373,7 @@ class MigrationManager:
             )
 
         state["current_version"] = self._get_current_version()
-        state["last_updated"] = datetime.now().isoformat()
+        state["last_updated"] = datetime.now(UTC).isoformat()
 
         with open(self.state_file, "w") as f:
             json.dump(state, f, indent=2)

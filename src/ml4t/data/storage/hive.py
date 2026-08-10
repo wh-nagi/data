@@ -308,13 +308,7 @@ class HiveStorage(StorageBackend):
         df = self._add_partition_columns(df, partition_cols)
 
         with self._key_lock(key):
-            effective_metadata = (
-                self._merge_preserved_metadata(key, metadata)
-                if preserve_metadata
-                else metadata.copy()
-                if metadata
-                else {}
-            )
+            effective_metadata = self._effective_metadata(key, metadata, preserve_metadata)
 
             staging_path, generation_id = self._prepare_generation(key)
             try:

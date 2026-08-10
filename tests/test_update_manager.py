@@ -570,6 +570,28 @@ class TestIncrementalUpdaterStrategies:
         assert record is not None
         assert record["custom"]["provider"] == "yahoo"
 
+    @pytest.mark.parametrize(
+        ("invalid_data", "message"),
+        [
+            (pl.DataFrame(), "Data must not be empty"),
+            (pl.DataFrame({"close": [1.0]}), "Data must have a 'timestamp' column"),
+        ],
+    )
+    def test_full_refresh_rejects_invalid_replacement_frames(
+        self,
+        storage: HiveStorage,
+        invalid_data: pl.DataFrame,
+        message: str,
+    ):
+        """Direct strategy callers receive a clear error before a replacement write."""
+        with pytest.raises(ValueError, match=message):
+            IncrementalUpdater().apply_strategy(
+                storage,
+                "test",
+                invalid_data,
+                UpdateStrategy.FULL_REFRESH,
+            )
+
     @pytest.mark.parametrize("strategy", list(UpdateStrategy))
     def test_rewrite_strategies_preserve_identity_and_refresh_range(
         self,

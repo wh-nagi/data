@@ -101,13 +101,16 @@ class StorageBackend(ABC):
             elif staging_path.is_dir():
                 shutil.rmtree(staging_path)
 
-    def _merge_preserved_metadata(
+    def _effective_metadata(
         self,
         key: str,
         metadata: dict[str, Any] | None,
+        preserve_metadata: bool,
     ) -> dict[str, Any]:
-        """Merge a metadata update into the current custom block while holding its key lock."""
+        """Resolve metadata for a write while holding its key lock."""
         effective_metadata = metadata.copy() if metadata else {}
+        if not preserve_metadata:
+            return effective_metadata
         try:
             current_record = self._current_commit(key).metadata
         except KeyError:

@@ -14,7 +14,6 @@ import structlog
 from ml4t.data.core.schemas import align_frames_for_concat
 from ml4t.data.providers.base import BaseProvider
 from ml4t.data.storage.backend import StorageBackend
-from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.metadata_tracker import MetadataTracker, UpdateRecord
 
 logger = structlog.get_logger()
@@ -41,6 +40,7 @@ def _rewrite_preserving_metadata(
         raise ValueError("Data must have a 'timestamp' column")
     min_ts = _ensure_datetime(data["timestamp"].min())
     max_ts = _ensure_datetime(data["timestamp"].max())
+    updated_at = datetime.now(UTC)
     storage.write(
         data,
         key,
@@ -50,7 +50,8 @@ def _rewrite_preserving_metadata(
             # Clear the inherited value so normalization uses the commit's fresh UTC stamp.
             "last_updated": None,
             "data_range": {"start": str(min_ts), "end": str(max_ts)},
-            "attributes": {"last_update": datetime.now().isoformat()},
+            # BulkManager compares this legacy field with naive local cutoffs.
+            "attributes": {"last_update": updated_at.astimezone().replace(tzinfo=None).isoformat()},
         },
         preserve_metadata=True,
     )
@@ -179,10 +180,10 @@ class GapDetector:
         frequency: str = "daily",
     ) -> list[dict[str, Any]]:
         """
-        Detect gaps directly in Hive storage structure.
+        Detect gaps through a storage backend.
 
         Args:
-            storage: HiveStorage instance
+            storage: Storage backend
             key: Storage key for the dataset
             start_date: Start of range to check
             end_date: End of range to check
@@ -275,7 +276,7 @@ class IncrementalUpdater:
 
     def determine_update_range(
         self,
-        storage: HiveStorage,
+        storage: StorageBackend,
         key: str,
         requested_start: datetime,
         requested_end: datetime,
@@ -333,7 +334,7 @@ class IncrementalUpdater:
 
     def update_incremental(
         self,
-        storage: HiveStorage,
+        storage: StorageBackend,
         tracker: MetadataTracker,
         key: str,
         new_data: pl.DataFrame,
@@ -449,7 +450,7 @@ class IncrementalUpdater:
 
     def apply_strategy(
         self,
-        storage: HiveStorage,
+        storage: StorageBackend,
         key: str,
         new_data: pl.DataFrame,
         strategy: UpdateStrategy,
@@ -637,7 +638,7 @@ class BackfillManager:
 
     def __init__(
         self,
-        storage: HiveStorage | None,
+        storage: StorageBackend | None,
         tracker: MetadataTracker | None,
     ) -> None:
         """

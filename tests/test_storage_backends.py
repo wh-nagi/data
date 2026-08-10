@@ -5,6 +5,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -174,6 +175,48 @@ class TestStorageBackends:
             "provider": "yahoo",
             "calendar": "NYSE",
             "attributes": {"source": "research", "updated": True},
+        }
+
+    @pytest.mark.parametrize("strategy", ["hive", "flat"])
+    def test_preserve_metadata_recovers_from_unreadable_current_record(
+        self, tmp_path, sample_data, strategy, monkeypatch
+    ):
+        """A damaged previous manifest cannot prevent a replacement write."""
+        storage = create_storage(tmp_path, strategy=strategy)
+        original_current_commit = storage._current_commit
+        attempts = 0
+
+        def damaged_once(key):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("damaged manifest")
+            return original_current_commit(key)
+
+        monkeypatch.setattr(storage, "_current_commit", damaged_once)
+        storage.write(
+            sample_data,
+            "test_key",
+            {"provider": "yahoo"},
+            preserve_metadata=True,
+        )
+
+        assert storage.read("test_key").collect().height == sample_data.height
+
+    @pytest.mark.parametrize("strategy", ["hive", "flat"])
+    def test_preserve_metadata_ignores_non_mapping_custom_block(
+        self, tmp_path, strategy, monkeypatch
+    ):
+        """Legacy non-mapping custom metadata is replaced by the supplied mapping."""
+        storage = create_storage(tmp_path, strategy=strategy)
+        monkeypatch.setattr(
+            storage,
+            "_current_commit",
+            lambda _key: SimpleNamespace(metadata={"custom": "legacy"}),
+        )
+
+        assert storage._effective_metadata("test_key", {"provider": "yahoo"}, True) == {
+            "provider": "yahoo"
         }
 
     @pytest.mark.parametrize("strategy", ["hive", "flat"])
