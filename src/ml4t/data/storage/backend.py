@@ -101,12 +101,47 @@ class StorageBackend(ABC):
             elif staging_path.is_dir():
                 shutil.rmtree(staging_path)
 
+    def _merge_preserved_metadata(
+        self,
+        key: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge a metadata update into the current custom block while holding its key lock."""
+        effective_metadata = metadata.copy() if metadata else {}
+        try:
+            current_record = self._current_commit(key).metadata
+        except KeyError:
+            return effective_metadata
+        except RuntimeError as error:
+            logger.warning(
+                "Ignoring unreadable metadata while replacing stored data",
+                key=key,
+                error=str(error),
+            )
+            return effective_metadata
+
+        current_custom = current_record.get("custom")
+        if not isinstance(current_custom, dict):
+            return effective_metadata
+
+        existing_attributes = current_custom.get("attributes")
+        updated_attributes = effective_metadata.get("attributes")
+        effective_metadata = {**current_custom, **effective_metadata}
+        if isinstance(existing_attributes, dict) and isinstance(updated_attributes, dict):
+            effective_metadata["attributes"] = {
+                **existing_attributes,
+                **updated_attributes,
+            }
+        return effective_metadata
+
     @abstractmethod
     def write(
         self,
         data: pl.LazyFrame | pl.DataFrame,
         key: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_metadata: bool = False,
     ) -> Path:
         """Write data to storage.
 
@@ -114,6 +149,7 @@ class StorageBackend(ABC):
             data: Polars LazyFrame to write
             key: Storage key (e.g., "BTC-USD", "SPY")
             metadata: Optional metadata to store alongside data
+            preserve_metadata: Merge metadata into the current custom block under the write lock
 
         Returns:
             Path to written file

@@ -456,7 +456,7 @@ class TestDataManagerUpdate:
         with (
             patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
             patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
-            pytest.raises(ValueError, match="Stored metadata provider must be a string"),
+            pytest.raises(ValueError, match="Stored metadata provider.*must be a string"),
         ):
             manager.update("AAPL", fill_gaps=False)
 

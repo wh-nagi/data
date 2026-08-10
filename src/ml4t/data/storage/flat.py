@@ -39,7 +39,12 @@ class FlatStorage(StorageBackend):
         super().__init__(config)
 
     def write(
-        self, data: pl.LazyFrame | pl.DataFrame, key: str, metadata: dict[str, Any] | None = None
+        self,
+        data: pl.LazyFrame | pl.DataFrame,
+        key: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        preserve_metadata: bool = False,
     ) -> Path:
         """Write data as a single file.
 
@@ -47,6 +52,7 @@ class FlatStorage(StorageBackend):
             data: Data to write
             key: Storage key (e.g., "BTC-USD")
             metadata: Optional metadata
+            preserve_metadata: Merge metadata into the current custom block under the write lock
 
         Returns:
             Path to written file
@@ -56,18 +62,25 @@ class FlatStorage(StorageBackend):
 
         df = lazy_data.collect()
         with self._key_lock(key):
+            effective_metadata = (
+                self._merge_preserved_metadata(key, metadata)
+                if preserve_metadata
+                else metadata.copy()
+                if metadata
+                else {}
+            )
             staging_path, generation_id = self._prepare_generation(key)
             try:
                 staged_file = staging_path / "data.parquet"
                 self._atomic_write(df, staged_file)
                 commit_metadata = (
                     {
-                        "last_updated": datetime.now().isoformat(),
+                        "last_updated": datetime.now(UTC).isoformat(),
                         "file_path": "data.parquet",
                         "row_count": len(df),
                         "schema": list(df.columns),
                         "file_size_mb": staged_file.stat().st_size / (1024 * 1024),
-                        "custom": metadata or {},
+                        "custom": effective_metadata,
                     }
                     if self.config.metadata_tracking
                     else {}

@@ -151,6 +151,32 @@ class TestStorageBackends:
         assert metadata["custom"]["source"] == "test"
 
     @pytest.mark.parametrize("strategy", ["hive", "flat"])
+    def test_preserve_metadata_merges_under_the_write_lock(self, temp_dir, sample_data, strategy):
+        """Both backends retain custom fields and merge attribute updates."""
+        storage = create_storage(temp_dir, strategy=strategy)
+        storage.write(
+            sample_data,
+            "test_key",
+            {"provider": "yahoo", "attributes": {"source": "research"}},
+            preserve_metadata=True,
+        )
+        storage.write(
+            sample_data,
+            "test_key",
+            {"calendar": "NYSE", "attributes": {"updated": True}},
+            preserve_metadata=True,
+        )
+        storage.write(sample_data, "test_key", preserve_metadata=True)
+
+        metadata = storage.get_metadata("test_key")
+        assert metadata is not None
+        assert metadata["custom"] == {
+            "provider": "yahoo",
+            "calendar": "NYSE",
+            "attributes": {"source": "research", "updated": True},
+        }
+
+    @pytest.mark.parametrize("strategy", ["hive", "flat"])
     def test_list_keys(self, temp_dir, sample_data, strategy):
         """Test listing stored keys."""
         storage = create_storage(temp_dir, strategy=strategy)

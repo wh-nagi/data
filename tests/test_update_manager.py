@@ -19,6 +19,7 @@ import pytest
 
 from ml4t.data.core.models import Metadata
 from ml4t.data.storage.backend import normalize_storage_metadata
+from ml4t.data.storage.flat import FlatStorage
 from ml4t.data.storage.hive import HiveStorage, StorageConfig
 from ml4t.data.storage.metadata_tracker import MetadataTracker
 from ml4t.data.update_manager import (
@@ -550,6 +551,25 @@ class TestIncrementalUpdaterStrategies:
         assert result.success is True
         # Should have both added and updated rows
 
+    def test_incremental_strategy_supports_flat_storage(
+        self, tmp_path: Path, existing_data: pl.DataFrame, new_data: pl.DataFrame
+    ):
+        """Metadata-preserving rewrites work through the shared storage interface."""
+        storage = FlatStorage(StorageConfig(base_path=tmp_path))
+        storage.write(existing_data, "test", {"provider": "yahoo"})
+
+        result = IncrementalUpdater().apply_strategy(
+            storage,
+            "test",
+            new_data,
+            UpdateStrategy.INCREMENTAL,
+        )
+
+        assert result.success is True
+        record = storage.get_metadata("test")
+        assert record is not None
+        assert record["custom"]["provider"] == "yahoo"
+
     @pytest.mark.parametrize("strategy", list(UpdateStrategy))
     def test_rewrite_strategies_preserve_identity_and_refresh_range(
         self,
@@ -591,6 +611,8 @@ class TestIncrementalUpdaterStrategies:
         assert normalized is not None
         assert normalized["provider"] == "yahoo"
         assert normalized["exchange"] == "XNYS"
+        assert normalized["calendar"] is None
+        assert normalized["bar_params"] == {}
         assert normalized["attributes"]["source"] == "research"
         rewritten = storage.read("test").collect()
         assert _ensure_datetime(

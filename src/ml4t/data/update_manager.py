@@ -13,6 +13,7 @@ import structlog
 
 from ml4t.data.core.schemas import align_frames_for_concat
 from ml4t.data.providers.base import BaseProvider
+from ml4t.data.storage.backend import StorageBackend
 from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.metadata_tracker import MetadataTracker, UpdateRecord
 
@@ -29,11 +30,15 @@ def _ensure_datetime(value: Any) -> datetime:
 
 
 def _rewrite_preserving_metadata(
-    storage: HiveStorage,
+    storage: StorageBackend,
     key: str,
     data: pl.DataFrame,
 ) -> None:
     """Publish replacement data with retained identity and a recomputed date range."""
+    if data.is_empty():
+        raise ValueError("Data must not be empty")
+    if "timestamp" not in data.columns:
+        raise ValueError("Data must have a 'timestamp' column")
     min_ts = _ensure_datetime(data["timestamp"].min())
     max_ts = _ensure_datetime(data["timestamp"].max())
     storage.write(
@@ -42,6 +47,7 @@ def _rewrite_preserving_metadata(
         {
             "start_date": min_ts,
             "end_date": max_ts,
+            # Clear the inherited value so normalization uses the commit's fresh UTC stamp.
             "last_updated": None,
             "data_range": {"start": str(min_ts), "end": str(max_ts)},
             "attributes": {"last_update": datetime.now().isoformat()},
@@ -166,7 +172,7 @@ class GapDetector:
 
     def detect_gaps_in_storage(
         self,
-        storage: HiveStorage,
+        storage: StorageBackend,
         key: str,
         start_date: datetime,
         end_date: datetime,

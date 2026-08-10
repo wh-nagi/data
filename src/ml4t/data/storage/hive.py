@@ -308,24 +308,13 @@ class HiveStorage(StorageBackend):
         df = self._add_partition_columns(df, partition_cols)
 
         with self._key_lock(key):
-            effective_metadata = metadata.copy() if metadata else {}
-            if preserve_metadata:
-                try:
-                    current_record = self._current_commit(key).metadata
-                except KeyError:
-                    current_record = {}
-                current_custom = current_record.get("custom")
-                if isinstance(current_custom, dict):
-                    existing_attributes = current_custom.get("attributes")
-                    updated_attributes = effective_metadata.get("attributes")
-                    effective_metadata = {**current_custom, **effective_metadata}
-                    if isinstance(existing_attributes, dict) and isinstance(
-                        updated_attributes, dict
-                    ):
-                        effective_metadata["attributes"] = {
-                            **existing_attributes,
-                            **updated_attributes,
-                        }
+            effective_metadata = (
+                self._merge_preserved_metadata(key, metadata)
+                if preserve_metadata
+                else metadata.copy()
+                if metadata
+                else {}
+            )
 
             staging_path, generation_id = self._prepare_generation(key)
             try:
@@ -343,7 +332,7 @@ class HiveStorage(StorageBackend):
 
                 commit_metadata = (
                     {
-                        "last_updated": datetime.now().isoformat(),
+                        "last_updated": datetime.now(UTC).isoformat(),
                         "partitions": partitions_written,
                         "row_count": len(df),
                         "schema": list(df.columns),

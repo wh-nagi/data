@@ -495,6 +495,20 @@ class StorageManager:
 
             logger.info("Found existing data", rows=len(existing_df))
 
+            existing_metadata = (
+                normalize_storage_metadata(self.storage.get_metadata(key), key) or {}
+            )
+            existing_provider = existing_metadata.get("provider")
+            if (
+                not provider
+                and existing_provider is not None
+                and not isinstance(existing_provider, str)
+            ):
+                raise ValueError(
+                    f"Stored metadata provider for '{key}' must be a string, "
+                    f"got {type(existing_provider).__name__}"
+                )
+
             # Get the date range from existing data
             _, last_timestamp = timestamp_bounds(existing_df)
             if last_timestamp.tzinfo is None:
@@ -590,9 +604,6 @@ class StorageManager:
             from ml4t.data.core.models import DataObject, Metadata
 
             min_ts, max_ts = timestamp_bounds(merged_df)
-            existing_metadata = (
-                normalize_storage_metadata(self.storage.get_metadata(key), key) or {}
-            )
             existing_attributes = existing_metadata.get("attributes")
             updated_attributes = (
                 existing_attributes.copy() if isinstance(existing_attributes, dict) else {}
@@ -613,13 +624,6 @@ class StorageManager:
                 for name in Metadata.model_fields
                 if (value := existing_metadata.get(name)) is not None
             }
-            existing_provider = existing_metadata.get("provider")
-            if (
-                provider is None
-                and existing_provider is not None
-                and not isinstance(existing_provider, str)
-            ):
-                raise ValueError("Stored metadata provider must be a string")
             resolved_provider = (
                 provider
                 or (existing_provider if isinstance(existing_provider, str) else None)
@@ -671,7 +675,7 @@ class StorageManager:
             updated_obj = DataObject(data=merged_df, metadata=updated_metadata)
 
             metadata_dict = updated_obj.metadata.model_dump() if updated_obj.metadata else None
-            self.storage.write(updated_obj.data, key, metadata_dict)
+            self.storage.write(updated_obj.data, key, metadata_dict, preserve_metadata=True)
 
             logger.info(
                 "Incremental update completed",
