@@ -18,6 +18,7 @@ import structlog
 from tenacity import RetryError
 
 from ml4t.data.core.schemas import align_frames_for_concat, timestamp_bounds
+from ml4t.data.storage.backend import normalize_storage_metadata
 from ml4t.data.utils.conversion import pandas_to_polars
 
 if TYPE_CHECKING:
@@ -588,24 +589,41 @@ class StorageManager:
             from ml4t.data.core.models import DataObject, Metadata
 
             min_ts, max_ts = timestamp_bounds(merged_df)
-
-            updated_metadata = Metadata(
-                provider=provider or "auto",
-                symbol=symbol,
-                asset_class=asset_class,
-                bar_type="time",
-                bar_params={"frequency": frequency},
-                data_range={
-                    "start": str(min_ts),
-                    "end": str(max_ts),
-                },
-                attributes={
-                    "last_update": datetime.now().isoformat(),
+            existing_metadata = (
+                normalize_storage_metadata(self.storage.get_metadata(key), key) or {}
+            )
+            existing_attributes = existing_metadata.get("attributes")
+            updated_attributes = (
+                existing_attributes.copy() if isinstance(existing_attributes, dict) else {}
+            )
+            updated_at = datetime.now(UTC)
+            updated_attributes.update(
+                {
+                    "last_update": updated_at.isoformat(),
                     "update_type": "incremental",
                     "gaps_filled": fill_gaps and len(gaps) > 0,
                     "provider_history_limited": provider_history_limited,
-                },
+                }
             )
+
+            metadata_values = {
+                **existing_metadata,
+                "provider": provider or existing_metadata.get("provider") or "auto",
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "bar_type": existing_metadata.get("bar_type") or "time",
+                "bar_params": existing_metadata.get("bar_params") or {"frequency": frequency},
+                "start_date": min_ts,
+                "end_date": max_ts,
+                "last_updated": updated_at,
+                "data_range": {
+                    "start": str(min_ts),
+                    "end": str(max_ts),
+                },
+                "attributes": updated_attributes,
+            }
+
+            updated_metadata = Metadata.model_validate(metadata_values)
 
             updated_obj = DataObject(data=merged_df, metadata=updated_metadata)
 

@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from ml4t.data.managers.metadata_manager import MetadataManager
 from ml4t.data.storage.backend import StorageConfig, normalize_storage_metadata
 from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.keys import decode_storage_key, encode_storage_key, storage_key_path
@@ -795,32 +794,3 @@ class TestNormalizeStorageMetadata:
             "last_updated": "2026-08-10T09:57:41.487386",
             "custom": {"last_updated": None, "provider": "yahoo"},
         }
-
-
-class TestMetadataSurvivesAnUpdate:
-    """The reader-facing symptom: `get_metadata` reported None right after `update()`."""
-
-    def test_last_updated_survives_a_provider_block_that_omits_it(self, tmp_path):
-        """`write` stamps `last_updated` itself and files the caller's dict under `custom`.
-
-        The incremental path hands it a provider block whose own `last_updated` is None,
-        which used to overwrite the stamp.
-        """
-        storage = HiveStorage(StorageConfig(base_path=tmp_path))
-        manager = MetadataManager(storage=storage)
-        key = "equities/daily/AAPL"
-        frame = pl.DataFrame(
-            {
-                "timestamp": pl.date_range(
-                    datetime(2023, 1, 1), datetime(2023, 3, 31), interval="1d", eager=True
-                ),
-            }
-        ).with_columns(close=pl.lit(1.0))
-
-        before = datetime.now()
-        storage.write(frame, key, metadata={"last_updated": None, "provider": "yahoo"})
-
-        reported = manager.get_metadata("AAPL")
-        assert reported["provider"] == "yahoo"
-        assert reported["last_updated"] is not None
-        assert datetime.fromisoformat(reported["last_updated"]) >= before

@@ -87,7 +87,7 @@ dependencies = [
     "click>=8.0.0",
     "python-dotenv>=1.0.0",
     "pydantic-settings>=2.0.0",
-    "pydantic>=2.12,<2.14",
+    "pydantic>=2.12,<3",
     # Utilities
     "structlog>=23.0.0",
     "platformdirs>=4.0.0",
@@ -182,6 +182,9 @@ dev = [
     "yfinance>=0.2.0",
     "oandapyV20>=0.7.0",
 ]
+
+[tool.uv]
+prerelease = "disallow"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

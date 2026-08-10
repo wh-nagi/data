@@ -40,8 +40,12 @@ def test_supported_python_and_platform_metadata() -> None:
     } <= classifiers
     assert "Programming Language :: Python :: 3.11" not in classifiers
     assert "Programming Language :: Python :: 3.15" not in classifiers
-    assert "pydantic>=2.12,<2.14" in project["dependencies"]
-    assert not any("python_version >= '3.15'" in item for item in project["dependencies"])
+    pydantic_requirements = [
+        item for item in project["dependencies"] if item.startswith("pydantic")
+    ]
+    assert len(pydantic_requirements) == 2
+    assert all("python_version" not in item for item in pydantic_requirements)
+    assert load_config()["tool"]["uv"]["prerelease"] == "disallow"
 
 
 def test_license_uses_spdx_metadata() -> None:

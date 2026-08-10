@@ -374,6 +374,37 @@ class TestDataManagerUpdate:
         # Should have at least the initial data (update merges data)
         assert len(stored_df) >= initial_rows
 
+    def test_update_preserves_complete_metadata(
+        self,
+        manager,
+        initial_data,
+        new_data,
+    ):
+        """Incremental updates retain identity fields and report the merged date range."""
+        manager.import_data(
+            initial_data,
+            symbol="AAPL",
+            provider="yahoo",
+            exchange="XNYS",
+            calendar="NYSE",
+        )
+
+        before = datetime.now(UTC)
+        with (
+            patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+
+        metadata = manager.get_metadata("AAPL")
+        assert metadata is not None
+        assert metadata["provider"] == "yahoo"
+        assert metadata["exchange"] == "XNYS"
+        assert metadata["calendar"] == "NYSE"
+        assert datetime.fromisoformat(metadata["start_date"]) == initial_data["timestamp"].min()
+        assert datetime.fromisoformat(metadata["end_date"]) == new_data["timestamp"].max()
+        assert datetime.fromisoformat(metadata["last_updated"]) >= before
+
     def test_update_handles_duplicates(self, manager, storage):
         """Test that update handles duplicate timestamps correctly."""
         key = manager.load("AAPL", "2024-01-01", "2024-01-05", provider="mock")

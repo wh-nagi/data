@@ -28,14 +28,17 @@ logger = structlog.get_logger()
 
 
 def normalize_storage_metadata(metadata: Any, key: str | None = None) -> dict[str, Any] | None:
-    """Return domain metadata from a canonical or legacy storage record."""
+    """Return flattened domain metadata from a canonical or legacy storage record.
+
+    Non-null values in ``custom`` override committed fields. A null custom value does not clear a
+    non-null committed value, but custom-only keys remain present even when their value is null.
+    """
     if not isinstance(metadata, dict) or not metadata:
         return None
 
     custom = metadata.get("custom")
     normalized = metadata.copy()
     if isinstance(custom, dict):
-        # Provider metadata overrides committed fields only when it supplies a value.
         for name, value in custom.items():
             if value is not None or normalized.get(name) is None:
                 normalized[name] = value
