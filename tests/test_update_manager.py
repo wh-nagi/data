@@ -548,6 +548,24 @@ class TestIncrementalUpdaterStrategies:
         assert result.success is True
         # Should have both added and updated rows
 
+    def test_rewrite_strategies_preserve_custom_metadata(
+        self, storage: HiveStorage, existing_data: pl.DataFrame, new_data: pl.DataFrame
+    ):
+        """Rewriting a generation must not discard the dataset identity metadata."""
+        metadata = {"provider": "yahoo", "exchange": "XNYS"}
+        storage.write(existing_data, "test", metadata)
+
+        IncrementalUpdater().apply_strategy(
+            storage,
+            "test",
+            new_data,
+            UpdateStrategy.INCREMENTAL,
+        )
+
+        record = storage.get_metadata("test")
+        assert record is not None
+        assert record["custom"] == metadata
+
     def test_update_incremental_missing_timestamp(
         self, storage: HiveStorage, tracker: MetadataTracker
     ):

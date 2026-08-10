@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
+from pydantic import ValidationError
 from tenacity import RetryError
 
 from ml4t.data.core.schemas import align_frames_for_concat, timestamp_bounds
@@ -599,20 +600,37 @@ class StorageManager:
             updated_at = datetime.now(UTC)
             updated_attributes.update(
                 {
-                    "last_update": updated_at.isoformat(),
+                    "last_update": datetime.now().isoformat(),
                     "update_type": "incremental",
                     "gaps_filled": fill_gaps and len(gaps) > 0,
                     "provider_history_limited": provider_history_limited,
                 }
             )
 
+            existing_model_values = {
+                name: value
+                for name in Metadata.model_fields
+                if (value := existing_metadata.get(name)) is not None
+            }
+            existing_provider = existing_metadata.get("provider")
+            resolved_provider = (
+                provider
+                or (existing_provider if isinstance(existing_provider, str) else None)
+                or "auto"
+            )
+            existing_bar_type = existing_metadata.get("bar_type")
+            existing_bar_params = existing_metadata.get("bar_params")
             metadata_values = {
-                **existing_metadata,
-                "provider": provider or existing_metadata.get("provider") or "auto",
+                **existing_model_values,
+                "provider": resolved_provider,
                 "symbol": symbol,
                 "asset_class": asset_class,
-                "bar_type": existing_metadata.get("bar_type") or "time",
-                "bar_params": existing_metadata.get("bar_params") or {"frequency": frequency},
+                "bar_type": existing_bar_type if isinstance(existing_bar_type, str) else "time",
+                "bar_params": (
+                    existing_bar_params
+                    if isinstance(existing_bar_params, dict)
+                    else {"frequency": frequency}
+                ),
                 "start_date": min_ts,
                 "end_date": max_ts,
                 "last_updated": updated_at,
@@ -623,7 +641,23 @@ class StorageManager:
                 "attributes": updated_attributes,
             }
 
-            updated_metadata = Metadata.model_validate(metadata_values)
+            try:
+                updated_metadata = Metadata.model_validate(metadata_values)
+            except ValidationError as error:
+                invalid_fields = {
+                    location[0]
+                    for detail in error.errors()
+                    if (location := detail.get("loc")) and isinstance(location[0], str)
+                }
+                logger.warning(
+                    "Ignoring invalid optional fields in stored metadata",
+                    key=key,
+                    fields=sorted(invalid_fields),
+                )
+                for field in invalid_fields:
+                    if field not in {"provider", "symbol", "asset_class"}:
+                        metadata_values.pop(field, None)
+                updated_metadata = Metadata.model_validate(metadata_values)
 
             updated_obj = DataObject(data=merged_df, metadata=updated_metadata)
 

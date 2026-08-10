@@ -40,11 +40,16 @@ def test_supported_python_and_platform_metadata() -> None:
     } <= classifiers
     assert "Programming Language :: Python :: 3.11" not in classifiers
     assert "Programming Language :: Python :: 3.15" not in classifiers
-    pydantic_requirements = [
-        item for item in project["dependencies"] if item.startswith("pydantic")
-    ]
-    assert len(pydantic_requirements) == 2
-    assert all("python_version" not in item for item in pydantic_requirements)
+    pydantic_requirement = next(
+        item for item in project["dependencies"] if item.startswith("pydantic>=")
+    )
+    assert ">=2.12" in pydantic_requirement
+    assert "<3" in pydantic_requirement
+    assert "python_version" not in pydantic_requirement
+
+
+def test_resolver_uses_stable_dependencies() -> None:
+    """The default lock cannot select prerelease-only compatibility packages."""
     assert load_config()["tool"]["uv"]["prerelease"] == "disallow"
 
 

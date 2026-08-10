@@ -28,6 +28,18 @@ def _ensure_datetime(value: Any) -> datetime:
     raise TypeError(f"Expected a date or datetime, got {type(value).__name__}")
 
 
+def _rewrite_preserving_metadata(
+    storage: HiveStorage,
+    key: str,
+    data: pl.DataFrame,
+) -> None:
+    """Publish replacement data while retaining the current custom metadata block."""
+    record = storage.get_metadata(key)
+    custom = record.get("custom") if isinstance(record, dict) else None
+    metadata = custom.copy() if isinstance(custom, dict) else None
+    storage.write(data, key, metadata)
+
+
 class UpdateStrategy(Enum):
     """Update strategy types."""
 
@@ -440,8 +452,7 @@ class IncrementalUpdater:
         """
         if strategy == UpdateStrategy.FULL_REFRESH:
             # Replace all data
-            storage.delete(key)
-            storage.write(new_data, key)
+            _rewrite_preserving_metadata(storage, key, new_data)
 
             return UpdateResult(
                 success=True,
@@ -465,8 +476,7 @@ class IncrementalUpdater:
                 if not new_rows.is_empty():
                     # Append new rows
                     combined = pl.concat([existing_df, new_rows])
-                    storage.delete(key)
-                    storage.write(combined, key)
+                    _rewrite_preserving_metadata(storage, key, combined)
 
                     return UpdateResult(
                         success=True,
@@ -519,8 +529,7 @@ class IncrementalUpdater:
                 if not gap_data.is_empty():
                     # Merge with existing data
                     combined = pl.concat([existing_df, gap_data]).sort("timestamp")
-                    storage.delete(key)
-                    storage.write(combined, key)
+                    _rewrite_preserving_metadata(storage, key, combined)
 
                     return UpdateResult(
                         success=True,
@@ -574,8 +583,7 @@ class IncrementalUpdater:
                 # Combine all data
                 combined = pl.concat([existing_filtered, new_data]).sort("timestamp")
 
-                storage.delete(key)
-                storage.write(combined, key)
+                _rewrite_preserving_metadata(storage, key, combined)
 
                 return UpdateResult(
                     success=True,
@@ -587,8 +595,7 @@ class IncrementalUpdater:
                 )
             # No overlap, just append
             combined = pl.concat([existing_df, new_data]).sort("timestamp")
-            storage.delete(key)
-            storage.write(combined, key)
+            _rewrite_preserving_metadata(storage, key, combined)
 
             return UpdateResult(
                 success=True,
