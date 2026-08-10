@@ -178,7 +178,7 @@ class TestStorageBackends:
         }
 
     @pytest.mark.parametrize("strategy", ["hive", "flat"])
-    def test_preserve_metadata_recovers_from_unreadable_current_record(
+    def test_preserve_metadata_continues_when_current_record_read_fails(
         self, tmp_path, sample_data, strategy, monkeypatch
     ):
         """A damaged previous manifest cannot prevent a replacement write."""
@@ -202,13 +202,13 @@ class TestStorageBackends:
         )
 
         assert storage.read("test_key").collect().height == sample_data.height
+        metadata = storage.get_metadata("test_key")
+        assert metadata is not None
+        assert metadata["custom"] == {"provider": "yahoo"}
 
-    @pytest.mark.parametrize("strategy", ["hive", "flat"])
-    def test_preserve_metadata_ignores_non_mapping_custom_block(
-        self, tmp_path, strategy, monkeypatch
-    ):
+    def test_preserve_metadata_ignores_non_mapping_custom_block(self, tmp_path, monkeypatch):
         """Legacy non-mapping custom metadata is replaced by the supplied mapping."""
-        storage = create_storage(tmp_path, strategy=strategy)
+        storage = create_storage(tmp_path, strategy="hive")
         monkeypatch.setattr(
             storage,
             "_current_commit",

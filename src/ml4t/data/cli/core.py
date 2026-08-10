@@ -545,12 +545,6 @@ def _metadata_datetime(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _format_metadata_datetime(value: object) -> str:
-    """Format one metadata timestamp explicitly in UTC."""
-    parsed = _metadata_datetime(value)
-    return parsed.isoformat(timespec="seconds").replace("+00:00", "Z") if parsed else ""
-
-
 def _metadata_health(metadata: dict[str, object], stale_days: int) -> str:
     """Classify a dataset from its canonical observation or update timestamp."""
     observed_through = _metadata_datetime(metadata.get("end_date") or metadata.get("last_updated"))
@@ -626,7 +620,7 @@ def status(ctx, detailed, stale_days, config_path, storage_path):
                     str(metadata.get("provider") or ""),
                     rows,
                     str(metadata.get("end_date") or "")[:10],
-                    _format_metadata_datetime(metadata.get("last_updated")),
+                    str(metadata.get("last_updated") or "")[:19],
                 )
             console.print(detail_table)
 
@@ -738,7 +732,7 @@ def info(symbol, frequency, asset_class, config_path, storage_path):
         table.add_row("Date Range", f"{df['timestamp'].min()} to {df['timestamp'].max()}")
         table.add_row("Columns", ", ".join(df.columns))
         table.add_row("Provider", str(metadata.get("provider") or ""))
-        table.add_row("Last Updated", _format_metadata_datetime(metadata.get("last_updated")))
+        table.add_row("Last Updated", str(metadata.get("last_updated") or "")[:19])
         table.add_row("Frequency", str(metadata.get("frequency") or frequency))
 
         console.print(table)
@@ -798,7 +792,7 @@ def list_data(_ctx, config, storage_path):
             rows = _format_row_count(row_count)
             start = str(metadata.get("start_date") or "")[:10]
             end = str(metadata.get("end_date") or "")[:10]
-            updated = _format_metadata_datetime(metadata.get("last_updated"))
+            updated = str(metadata.get("last_updated") or "")[:19]
             table.add_row(key, symbol, provider, rows, f"{start} to {end}", updated)
 
         console.print(table)
