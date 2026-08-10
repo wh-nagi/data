@@ -600,7 +600,8 @@ class StorageManager:
             updated_at = datetime.now(UTC)
             updated_attributes.update(
                 {
-                    "last_update": datetime.now().isoformat(),
+                    # BulkManager compares this legacy field with naive local cutoffs.
+                    "last_update": updated_at.astimezone().replace(tzinfo=None).isoformat(),
                     "update_type": "incremental",
                     "gaps_filled": fill_gaps and len(gaps) > 0,
                     "provider_history_limited": provider_history_limited,
@@ -613,6 +614,12 @@ class StorageManager:
                 if (value := existing_metadata.get(name)) is not None
             }
             existing_provider = existing_metadata.get("provider")
+            if (
+                provider is None
+                and existing_provider is not None
+                and not isinstance(existing_provider, str)
+            ):
+                raise ValueError("Stored metadata provider must be a string")
             resolved_provider = (
                 provider
                 or (existing_provider if isinstance(existing_provider, str) else None)
@@ -649,14 +656,16 @@ class StorageManager:
                     for detail in error.errors()
                     if (location := detail.get("loc")) and isinstance(location[0], str)
                 }
+                removable_fields = invalid_fields - {"provider", "symbol", "asset_class"}
+                if not removable_fields:
+                    raise
                 logger.warning(
                     "Ignoring invalid optional fields in stored metadata",
                     key=key,
-                    fields=sorted(invalid_fields),
+                    fields=sorted(removable_fields),
                 )
-                for field in invalid_fields:
-                    if field not in {"provider", "symbol", "asset_class"}:
-                        metadata_values.pop(field, None)
+                for field in removable_fields:
+                    metadata_values.pop(field, None)
                 updated_metadata = Metadata.model_validate(metadata_values)
 
             updated_obj = DataObject(data=merged_df, metadata=updated_metadata)

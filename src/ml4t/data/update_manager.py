@@ -33,11 +33,21 @@ def _rewrite_preserving_metadata(
     key: str,
     data: pl.DataFrame,
 ) -> None:
-    """Publish replacement data while retaining the current custom metadata block."""
-    record = storage.get_metadata(key)
-    custom = record.get("custom") if isinstance(record, dict) else None
-    metadata = custom.copy() if isinstance(custom, dict) else None
-    storage.write(data, key, metadata)
+    """Publish replacement data with retained identity and a recomputed date range."""
+    min_ts = _ensure_datetime(data["timestamp"].min())
+    max_ts = _ensure_datetime(data["timestamp"].max())
+    storage.write(
+        data,
+        key,
+        {
+            "start_date": min_ts,
+            "end_date": max_ts,
+            "last_updated": None,
+            "data_range": {"start": str(min_ts), "end": str(max_ts)},
+            "attributes": {"last_update": datetime.now().isoformat()},
+        },
+        preserve_metadata=True,
+    )
 
 
 class UpdateStrategy(Enum):

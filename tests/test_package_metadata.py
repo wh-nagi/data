@@ -41,11 +41,10 @@ def test_supported_python_and_platform_metadata() -> None:
     assert "Programming Language :: Python :: 3.11" not in classifiers
     assert "Programming Language :: Python :: 3.15" not in classifiers
     pydantic_requirement = next(
-        item for item in project["dependencies"] if item.startswith("pydantic>=")
+        (item for item in project["dependencies"] if item.startswith("pydantic>=")),
+        None,
     )
-    assert ">=2.12" in pydantic_requirement
-    assert "<3" in pydantic_requirement
-    assert "python_version" not in pydantic_requirement
+    assert pydantic_requirement == "pydantic>=2.12,<3"
 
 
 def test_resolver_uses_stable_dependencies() -> None:

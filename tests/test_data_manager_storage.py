@@ -437,7 +437,30 @@ class TestDataManagerUpdate:
         assert metadata is not None
         assert metadata["provider"] == "legacy"
         assert metadata["exchange"] == "UNKNOWN"
+        assert metadata["schema_version"] == "1.0"
+        assert metadata["provider_params"] == {}
         assert metadata["attributes"]["source"] == "legacy-sidecar"
+
+    def test_update_rejects_invalid_required_legacy_metadata(
+        self,
+        manager,
+        storage,
+        initial_data,
+        new_data,
+    ):
+        """A corrupt stored provider fails explicitly and leaves the generation untouched."""
+        key = "equities/daily/AAPL"
+        storage.write(initial_data, key, {"provider": {"invalid": True}})
+        record_before = storage.get_metadata(key)
+
+        with (
+            patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+            pytest.raises(ValueError, match="Stored metadata provider must be a string"),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+
+        assert storage.get_metadata(key) == record_before
 
     def test_second_update_retains_attributes_and_earliest_timestamp(
         self,

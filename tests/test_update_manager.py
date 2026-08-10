@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 import polars as pl
 import pytest
 
+from ml4t.data.core.models import Metadata
+from ml4t.data.storage.backend import normalize_storage_metadata
 from ml4t.data.storage.hive import HiveStorage, StorageConfig
 from ml4t.data.storage.metadata_tracker import MetadataTracker
 from ml4t.data.update_manager import (
@@ -548,23 +550,57 @@ class TestIncrementalUpdaterStrategies:
         assert result.success is True
         # Should have both added and updated rows
 
-    def test_rewrite_strategies_preserve_custom_metadata(
-        self, storage: HiveStorage, existing_data: pl.DataFrame, new_data: pl.DataFrame
+    @pytest.mark.parametrize("strategy", list(UpdateStrategy))
+    def test_rewrite_strategies_preserve_identity_and_refresh_range(
+        self,
+        storage: HiveStorage,
+        existing_data: pl.DataFrame,
+        new_data: pl.DataFrame,
+        strategy: UpdateStrategy,
     ):
-        """Rewriting a generation must not discard the dataset identity metadata."""
-        metadata = {"provider": "yahoo", "exchange": "XNYS"}
-        storage.write(existing_data, "test", metadata)
+        """Every rewrite retains identity while replacing stale range and recency fields."""
+        old_update = datetime(2020, 1, 1, tzinfo=UTC)
+        metadata = Metadata(
+            provider="yahoo",
+            symbol="AAPL",
+            asset_class="equities",
+            exchange="XNYS",
+            start_date=existing_data["timestamp"].min(),
+            end_date=existing_data["timestamp"].max(),
+            last_updated=old_update,
+            attributes={"last_update": old_update.isoformat(), "source": "research"},
+        ).model_dump()
+
+        stored_data = existing_data
+        replacement = new_data
+        if strategy == UpdateStrategy.BACKFILL:
+            missing_timestamp = existing_data["timestamp"][7]
+            stored_data = existing_data.filter(pl.col("timestamp") != missing_timestamp)
+            replacement = existing_data.filter(pl.col("timestamp") == missing_timestamp)
+        storage.write(stored_data, "test", metadata)
 
         IncrementalUpdater().apply_strategy(
             storage,
             "test",
-            new_data,
-            UpdateStrategy.INCREMENTAL,
+            replacement,
+            strategy,
         )
 
         record = storage.get_metadata("test")
-        assert record is not None
-        assert record["custom"] == metadata
+        normalized = normalize_storage_metadata(record)
+        assert normalized is not None
+        assert normalized["provider"] == "yahoo"
+        assert normalized["exchange"] == "XNYS"
+        assert normalized["attributes"]["source"] == "research"
+        rewritten = storage.read("test").collect()
+        assert _ensure_datetime(
+            datetime.fromisoformat(normalized["start_date"])
+        ) == _ensure_datetime(rewritten["timestamp"].min())
+        assert _ensure_datetime(datetime.fromisoformat(normalized["end_date"])) == _ensure_datetime(
+            rewritten["timestamp"].max()
+        )
+        assert _ensure_datetime(datetime.fromisoformat(normalized["last_updated"])) > old_update
+        assert normalized["attributes"]["last_update"] != old_update.isoformat()
 
     def test_update_incremental_missing_timestamp(
         self, storage: HiveStorage, tracker: MetadataTracker
