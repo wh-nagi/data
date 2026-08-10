@@ -25,7 +25,7 @@ def test_supported_python_and_platform_metadata() -> None:
     project = load_project()
     classifiers = set(project["classifiers"])
 
-    assert project["requires-python"] == ">=3.12"
+    assert project["requires-python"] == ">=3.12,<3.15"
     assert "Development Status :: 5 - Production/Stable" in classifiers
     assert "Operating System :: OS Independent" not in classifiers
     assert {
@@ -40,6 +40,8 @@ def test_supported_python_and_platform_metadata() -> None:
     } <= classifiers
     assert "Programming Language :: Python :: 3.11" not in classifiers
     assert "Programming Language :: Python :: 3.15" not in classifiers
+    assert "pydantic>=2.12,<2.14" in project["dependencies"]
+    assert not any("python_version >= '3.15'" in item for item in project["dependencies"])
 
 
 def test_license_uses_spdx_metadata() -> None:

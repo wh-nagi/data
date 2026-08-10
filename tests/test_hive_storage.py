@@ -783,6 +783,19 @@ class TestNormalizeStorageMetadata:
         assert "calendar" in normalized
         assert normalized["calendar"] is None
 
+    def test_normalization_does_not_mutate_the_record(self):
+        metadata = {
+            "last_updated": "2026-08-10T09:57:41.487386",
+            "custom": {"last_updated": None, "provider": "yahoo"},
+        }
+
+        normalize_storage_metadata(metadata)
+
+        assert metadata == {
+            "last_updated": "2026-08-10T09:57:41.487386",
+            "custom": {"last_updated": None, "provider": "yahoo"},
+        }
+
 
 class TestMetadataSurvivesAnUpdate:
     """The reader-facing symptom: `get_metadata` reported None right after `update()`."""
