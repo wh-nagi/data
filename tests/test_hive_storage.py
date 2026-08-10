@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from ml4t.data.storage.backend import StorageConfig
+from ml4t.data.storage.backend import StorageConfig, normalize_storage_metadata
 from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.keys import decode_storage_key, encode_storage_key, storage_key_path
 
@@ -749,3 +749,48 @@ class TestPartitionsAccessor:
 
         assert [part.label for part in parts] == ["2023-01", "2023-02", "2023-03"]
         assert len({part.path.parent.parent for part in parts}) == 1
+
+
+class TestNormalizeStorageMetadata:
+    """`custom` overrides the record it sits in, but a null in it is not an override."""
+
+    def test_custom_value_overrides_the_record(self):
+        normalized = normalize_storage_metadata(
+            {"provider": "record", "row_count": 10, "custom": {"provider": "yahoo"}}
+        )
+
+        assert normalized["provider"] == "yahoo"
+        assert normalized["row_count"] == 10
+
+    def test_null_in_custom_does_not_erase_the_record(self):
+        """An incremental update writes custom.last_updated=None over a correct record value."""
+        normalized = normalize_storage_metadata(
+            {
+                "last_updated": "2026-08-10T09:57:41.487386",
+                "row_count": 1316,
+                "custom": {"last_updated": None, "end_date": None, "provider": "yahoo"},
+            }
+        )
+
+        assert normalized["last_updated"] == "2026-08-10T09:57:41.487386"
+        assert normalized["provider"] == "yahoo"
+
+    def test_key_absent_from_the_record_keeps_its_null(self):
+        """Dropping the key instead would turn a reported null into a KeyError for callers."""
+        normalized = normalize_storage_metadata({"row_count": 1, "custom": {"calendar": None}})
+
+        assert "calendar" in normalized
+        assert normalized["calendar"] is None
+
+    def test_normalization_does_not_mutate_the_record(self):
+        metadata = {
+            "last_updated": "2026-08-10T09:57:41.487386",
+            "custom": {"last_updated": None, "provider": "yahoo"},
+        }
+
+        normalize_storage_metadata(metadata)
+
+        assert metadata == {
+            "last_updated": "2026-08-10T09:57:41.487386",
+            "custom": {"last_updated": None, "provider": "yahoo"},
+        }

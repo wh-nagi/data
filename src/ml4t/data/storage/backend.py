@@ -28,12 +28,20 @@ logger = structlog.get_logger()
 
 
 def normalize_storage_metadata(metadata: Any, key: str | None = None) -> dict[str, Any] | None:
-    """Return domain metadata from a canonical or legacy storage record."""
+    """Return flattened domain metadata from a canonical or legacy storage record.
+
+    Non-null values in ``custom`` override committed fields. A null custom value does not clear a
+    non-null committed value, but custom-only keys remain present even when their value is null.
+    """
     if not isinstance(metadata, dict) or not metadata:
         return None
 
     custom = metadata.get("custom")
-    normalized = {**metadata, **custom} if isinstance(custom, dict) else metadata.copy()
+    normalized = metadata.copy()
+    if isinstance(custom, dict):
+        for name, value in custom.items():
+            if value is not None or normalized.get(name) is None:
+                normalized[name] = value
 
     if key is not None:
         parts = key.split("/", 2)
@@ -93,12 +101,50 @@ class StorageBackend(ABC):
             elif staging_path.is_dir():
                 shutil.rmtree(staging_path)
 
+    def _effective_metadata(
+        self,
+        key: str,
+        metadata: dict[str, Any] | None,
+        preserve_metadata: bool,
+    ) -> dict[str, Any]:
+        """Resolve metadata for a write while holding its key lock."""
+        effective_metadata = metadata.copy() if metadata else {}
+        if not preserve_metadata:
+            return effective_metadata
+        try:
+            current_record = self._current_commit(key).metadata
+        except KeyError:
+            return effective_metadata
+        except RuntimeError as error:
+            logger.warning(
+                "Ignoring unreadable metadata while replacing stored data",
+                key=key,
+                error=str(error),
+            )
+            return effective_metadata
+
+        current_custom = current_record.get("custom")
+        if not isinstance(current_custom, dict):
+            return effective_metadata
+
+        existing_attributes = current_custom.get("attributes")
+        updated_attributes = effective_metadata.get("attributes")
+        effective_metadata = {**current_custom, **effective_metadata}
+        if isinstance(existing_attributes, dict) and isinstance(updated_attributes, dict):
+            effective_metadata["attributes"] = {
+                **existing_attributes,
+                **updated_attributes,
+            }
+        return effective_metadata
+
     @abstractmethod
     def write(
         self,
         data: pl.LazyFrame | pl.DataFrame,
         key: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_metadata: bool = False,
     ) -> Path:
         """Write data to storage.
 
@@ -106,6 +152,7 @@ class StorageBackend(ABC):
             data: Polars LazyFrame to write
             key: Storage key (e.g., "BTC-USD", "SPY")
             metadata: Optional metadata to store alongside data
+            preserve_metadata: Merge metadata into the current custom block under the write lock
 
         Returns:
             Path to written file

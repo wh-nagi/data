@@ -39,8 +39,8 @@ def test_compatibility_matrix_covers_release_policy() -> None:
     matrix = compatibility["strategy"]["matrix"]
 
     assert matrix["os"] == ["ubuntu-latest", "macos-latest", "windows-latest"]
-    assert matrix["python-version"] == ["3.12", "3.13", "3.14", "3.15"]
-    assert compatibility["continue-on-error"] == "${{ matrix.python-version == '3.15' }}"
+    assert matrix["python-version"] == ["3.12", "3.13", "3.14"]
+    assert "continue-on-error" not in compatibility
 
 
 def test_publish_uses_only_the_validated_package_directory() -> None:

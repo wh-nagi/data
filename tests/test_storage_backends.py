@@ -5,6 +5,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -149,6 +150,74 @@ class TestStorageBackends:
         assert metadata["row_count"] == len(sample_data)
         assert "custom" in metadata
         assert metadata["custom"]["source"] == "test"
+
+    @pytest.mark.parametrize("strategy", ["hive", "flat"])
+    def test_preserve_metadata_merges_under_the_write_lock(self, temp_dir, sample_data, strategy):
+        """Both backends retain custom fields and merge attribute updates."""
+        storage = create_storage(temp_dir, strategy=strategy)
+        storage.write(
+            sample_data,
+            "test_key",
+            {"provider": "yahoo", "attributes": {"source": "research"}},
+            preserve_metadata=True,
+        )
+        storage.write(
+            sample_data,
+            "test_key",
+            {"calendar": "NYSE", "attributes": {"updated": True}},
+            preserve_metadata=True,
+        )
+        storage.write(sample_data, "test_key", preserve_metadata=True)
+
+        metadata = storage.get_metadata("test_key")
+        assert metadata is not None
+        assert metadata["custom"] == {
+            "provider": "yahoo",
+            "calendar": "NYSE",
+            "attributes": {"source": "research", "updated": True},
+        }
+
+    @pytest.mark.parametrize("strategy", ["hive", "flat"])
+    def test_preserve_metadata_continues_when_current_record_read_fails(
+        self, tmp_path, sample_data, strategy, monkeypatch
+    ):
+        """A damaged previous manifest cannot prevent a replacement write."""
+        storage = create_storage(tmp_path, strategy=strategy)
+        original_current_commit = storage._current_commit
+        attempts = 0
+
+        def damaged_once(key):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("damaged manifest")
+            return original_current_commit(key)
+
+        monkeypatch.setattr(storage, "_current_commit", damaged_once)
+        storage.write(
+            sample_data,
+            "test_key",
+            {"provider": "yahoo"},
+            preserve_metadata=True,
+        )
+
+        assert storage.read("test_key").collect().height == sample_data.height
+        metadata = storage.get_metadata("test_key")
+        assert metadata is not None
+        assert metadata["custom"] == {"provider": "yahoo"}
+
+    def test_preserve_metadata_ignores_non_mapping_custom_block(self, tmp_path, monkeypatch):
+        """Legacy non-mapping custom metadata is replaced by the supplied mapping."""
+        storage = create_storage(tmp_path, strategy="hive")
+        monkeypatch.setattr(
+            storage,
+            "_current_commit",
+            lambda _key: SimpleNamespace(metadata={"custom": "legacy"}),
+        )
+
+        assert storage._effective_metadata("test_key", {"provider": "yahoo"}, True) == {
+            "provider": "yahoo"
+        }
 
     @pytest.mark.parametrize("strategy", ["hive", "flat"])
     def test_list_keys(self, temp_dir, sample_data, strategy):

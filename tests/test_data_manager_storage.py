@@ -374,6 +374,121 @@ class TestDataManagerUpdate:
         # Should have at least the initial data (update merges data)
         assert len(stored_df) >= initial_rows
 
+    def test_update_preserves_complete_metadata(
+        self,
+        manager,
+        initial_data,
+        new_data,
+    ):
+        """Incremental updates retain identity fields and report the merged date range."""
+        manager.import_data(
+            initial_data,
+            symbol="AAPL",
+            provider="yahoo",
+            exchange="XNYS",
+            calendar="NYSE",
+        )
+
+        before = datetime.now(UTC)
+        with (
+            patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+
+        metadata = manager.get_metadata("AAPL")
+        assert metadata is not None
+        assert metadata["provider"] == "yahoo"
+        assert metadata["exchange"] == "XNYS"
+        assert metadata["calendar"] == "NYSE"
+        assert datetime.fromisoformat(metadata["start_date"]) == initial_data["timestamp"].min()
+        assert datetime.fromisoformat(metadata["end_date"]) == new_data["timestamp"].max()
+        assert datetime.fromisoformat(metadata["last_updated"]) >= before
+
+    def test_update_accepts_partial_legacy_metadata(
+        self,
+        manager,
+        storage,
+        initial_data,
+        new_data,
+    ):
+        """A malformed optional legacy field cannot prevent an otherwise valid update."""
+        key = "equities/daily/AAPL"
+        storage.write(
+            initial_data,
+            key,
+            {
+                "provider": "legacy",
+                "exchange": None,
+                "schema_version": "legacy",
+                "provider_params": "invalid",
+                "download_utc_timestamp": None,
+                "attributes": {"source": "legacy-sidecar"},
+            },
+        )
+
+        with (
+            patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+
+        metadata = manager.get_metadata("AAPL")
+        assert metadata is not None
+        assert metadata["provider"] == "legacy"
+        assert metadata["exchange"] == "UNKNOWN"
+        assert metadata["schema_version"] == "1.0"
+        assert metadata["provider_params"] == {}
+        assert metadata["attributes"]["source"] == "legacy-sidecar"
+
+    def test_update_rejects_invalid_required_legacy_metadata(
+        self,
+        manager,
+        storage,
+        initial_data,
+        new_data,
+    ):
+        """A corrupt stored provider fails explicitly and leaves the generation untouched."""
+        key = "equities/daily/AAPL"
+        storage.write(initial_data, key, {"provider": {"invalid": True}})
+        record_before = storage.get_metadata(key)
+
+        with (
+            patch.object(manager._fetch_manager, "fetch_raw", return_value=new_data),
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+            pytest.raises(ValueError, match="Stored metadata provider.*must be a string"),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+
+        assert storage.get_metadata(key) == record_before
+
+    def test_second_update_retains_attributes_and_earliest_timestamp(
+        self,
+        manager,
+        initial_data,
+        new_data,
+    ):
+        """Repeated updates retain user attributes and the complete date range."""
+        key = manager.import_data(initial_data, symbol="AAPL", provider="yahoo")
+        record = manager._storage_manager.storage.get_metadata(key)
+        assert record is not None
+        record["custom"]["attributes"]["source"] = "research"
+        manager._storage_manager.storage.write(initial_data, key, record["custom"])
+
+        final_data = new_data.with_columns(pl.col("timestamp") + timedelta(days=8))
+        with (
+            patch.object(manager._fetch_manager, "get_max_history_days", return_value=None),
+            patch.object(manager._fetch_manager, "fetch_raw", side_effect=[new_data, final_data]),
+        ):
+            manager.update("AAPL", fill_gaps=False)
+            manager.update("AAPL", fill_gaps=False)
+
+        metadata = manager.get_metadata("AAPL")
+        assert metadata is not None
+        assert metadata["attributes"]["source"] == "research"
+        assert datetime.fromisoformat(metadata["start_date"]) == initial_data["timestamp"].min()
+        assert datetime.fromisoformat(metadata["end_date"]) == final_data["timestamp"].max()
+
     def test_update_handles_duplicates(self, manager, storage):
         """Test that update handles duplicate timestamps correctly."""
         key = manager.load("AAPL", "2024-01-01", "2024-01-05", provider="mock")

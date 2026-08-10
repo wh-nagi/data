@@ -67,8 +67,9 @@ print(f"Fetched {len(df)} rows")
 ## Requirements
 
 - Stable CPython 3.12 through 3.14 on Linux, macOS, or Windows
-- Python 3.15 prereleases are tested as informational checks but are not supported
-- The Databento SDK does not yet publish a Python 3.15 distribution, so that optional extra is
-  excluded from prerelease testing until an upstream build is available
+- Python 3.15 is not supported until the core dependency stack passes the complete compatibility
+  suite on Linux, macOS, and Windows
+- Releases 0.1.0 and 0.1.1 predate the Python 3.15 upper bound, so an unpinned installation on
+  Python 3.15 may select one of those older releases
 - Polars (automatically installed)
 - Provider-specific SDKs (optional)

@@ -15,9 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import structlog
+from pydantic import ValidationError
 from tenacity import RetryError
 
 from ml4t.data.core.schemas import align_frames_for_concat, timestamp_bounds
+from ml4t.data.storage.backend import normalize_storage_metadata
 from ml4t.data.utils.conversion import pandas_to_polars
 
 if TYPE_CHECKING:
@@ -493,6 +495,20 @@ class StorageManager:
 
             logger.info("Found existing data", rows=len(existing_df))
 
+            existing_metadata = (
+                normalize_storage_metadata(self.storage.get_metadata(key), key) or {}
+            )
+            existing_provider = existing_metadata.get("provider")
+            if (
+                not provider
+                and existing_provider is not None
+                and not isinstance(existing_provider, str)
+            ):
+                raise ValueError(
+                    f"Stored metadata provider for '{key}' must be a string, "
+                    f"got {type(existing_provider).__name__}"
+                )
+
             # Get the date range from existing data
             _, last_timestamp = timestamp_bounds(existing_df)
             if last_timestamp.tzinfo is None:
@@ -588,29 +604,78 @@ class StorageManager:
             from ml4t.data.core.models import DataObject, Metadata
 
             min_ts, max_ts = timestamp_bounds(merged_df)
-
-            updated_metadata = Metadata(
-                provider=provider or "auto",
-                symbol=symbol,
-                asset_class=asset_class,
-                bar_type="time",
-                bar_params={"frequency": frequency},
-                data_range={
-                    "start": str(min_ts),
-                    "end": str(max_ts),
-                },
-                attributes={
-                    "last_update": datetime.now().isoformat(),
+            existing_attributes = existing_metadata.get("attributes")
+            updated_attributes = (
+                existing_attributes.copy() if isinstance(existing_attributes, dict) else {}
+            )
+            updated_at = datetime.now(UTC)
+            updated_attributes.update(
+                {
+                    # BulkManager compares this legacy field with naive local cutoffs.
+                    "last_update": updated_at.astimezone().replace(tzinfo=None).isoformat(),
                     "update_type": "incremental",
                     "gaps_filled": fill_gaps and len(gaps) > 0,
                     "provider_history_limited": provider_history_limited,
-                },
+                }
             )
+
+            existing_model_values = {
+                name: value
+                for name in Metadata.model_fields
+                if (value := existing_metadata.get(name)) is not None
+            }
+            resolved_provider = (
+                provider
+                or (existing_provider if isinstance(existing_provider, str) else None)
+                or "auto"
+            )
+            existing_bar_type = existing_metadata.get("bar_type")
+            existing_bar_params = existing_metadata.get("bar_params")
+            metadata_values = {
+                **existing_model_values,
+                "provider": resolved_provider,
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "bar_type": existing_bar_type if isinstance(existing_bar_type, str) else "time",
+                "bar_params": (
+                    existing_bar_params
+                    if isinstance(existing_bar_params, dict)
+                    else {"frequency": frequency}
+                ),
+                "start_date": min_ts,
+                "end_date": max_ts,
+                "last_updated": updated_at,
+                "data_range": {
+                    "start": str(min_ts),
+                    "end": str(max_ts),
+                },
+                "attributes": updated_attributes,
+            }
+
+            try:
+                updated_metadata = Metadata.model_validate(metadata_values)
+            except ValidationError as error:
+                invalid_fields = {
+                    location[0]
+                    for detail in error.errors()
+                    if (location := detail.get("loc")) and isinstance(location[0], str)
+                }
+                removable_fields = invalid_fields - {"provider", "symbol", "asset_class"}
+                if not removable_fields:
+                    raise
+                logger.warning(
+                    "Ignoring invalid optional fields in stored metadata",
+                    key=key,
+                    fields=sorted(removable_fields),
+                )
+                for field in removable_fields:
+                    metadata_values.pop(field, None)
+                updated_metadata = Metadata.model_validate(metadata_values)
 
             updated_obj = DataObject(data=merged_df, metadata=updated_metadata)
 
             metadata_dict = updated_obj.metadata.model_dump() if updated_obj.metadata else None
-            self.storage.write(updated_obj.data, key, metadata_dict)
+            self.storage.write(updated_obj.data, key, metadata_dict, preserve_metadata=True)
 
             logger.info(
                 "Incremental update completed",

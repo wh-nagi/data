@@ -25,7 +25,7 @@ def test_supported_python_and_platform_metadata() -> None:
     project = load_project()
     classifiers = set(project["classifiers"])
 
-    assert project["requires-python"] == ">=3.12"
+    assert project["requires-python"] == ">=3.12,<3.15"
     assert "Development Status :: 5 - Production/Stable" in classifiers
     assert "Operating System :: OS Independent" not in classifiers
     assert {
@@ -40,6 +40,16 @@ def test_supported_python_and_platform_metadata() -> None:
     } <= classifiers
     assert "Programming Language :: Python :: 3.11" not in classifiers
     assert "Programming Language :: Python :: 3.15" not in classifiers
+    pydantic_requirement = next(
+        (item for item in project["dependencies"] if item.startswith("pydantic>=")),
+        None,
+    )
+    assert pydantic_requirement == "pydantic>=2.12,<3"
+
+
+def test_resolver_uses_stable_dependencies() -> None:
+    """The default lock cannot select prerelease-only compatibility packages."""
+    assert load_config()["tool"]["uv"]["prerelease"] == "disallow"
 
 
 def test_license_uses_spdx_metadata() -> None:

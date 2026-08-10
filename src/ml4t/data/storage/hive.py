@@ -277,6 +277,8 @@ class HiveStorage(StorageBackend):
         data: pl.LazyFrame | pl.DataFrame,
         key: str,
         metadata: dict[str, Any] | None = None,
+        *,
+        preserve_metadata: bool = False,
     ) -> Path:
         """Write data using Hive partitioning.
 
@@ -284,6 +286,7 @@ class HiveStorage(StorageBackend):
             data: DataFrame or LazyFrame to write
             key: Storage key (e.g., "BTC-USD" or "equities/daily/AAPL")
             metadata: Optional metadata dict
+            preserve_metadata: Merge metadata into the current custom block under the write lock
 
         Returns:
             Path to the committed data generation
@@ -305,6 +308,8 @@ class HiveStorage(StorageBackend):
         df = self._add_partition_columns(df, partition_cols)
 
         with self._key_lock(key):
+            effective_metadata = self._effective_metadata(key, metadata, preserve_metadata)
+
             staging_path, generation_id = self._prepare_generation(key)
             try:
                 partitions_written = []
@@ -321,11 +326,11 @@ class HiveStorage(StorageBackend):
 
                 commit_metadata = (
                     {
-                        "last_updated": datetime.now().isoformat(),
+                        "last_updated": datetime.now(UTC).isoformat(),
                         "partitions": partitions_written,
                         "row_count": len(df),
                         "schema": list(df.columns),
-                        "custom": metadata or {},
+                        "custom": effective_metadata,
                     }
                     if self.config.metadata_tracking
                     else {}
