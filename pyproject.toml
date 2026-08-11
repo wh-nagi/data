@@ -171,6 +171,8 @@ test = [
     "hypothesis>=6.80.0",
     "ty",
     "xlsxwriter>=3.1.0",
+    "oandapyV20>=0.7.0",
+    "requests>=2.32.0",
 ]
 dev = [
     { include-group = "test" },
@@ -180,11 +182,10 @@ dev = [
     "pip-audit>=2.10.1",
     "databento>=0.38.0",
     "yfinance>=0.2.0",
-    "oandapyV20>=0.7.0",
 ]
 
 [tool.uv]
-prerelease = "disallow"
+prerelease = "if-necessary-or-explicit"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
