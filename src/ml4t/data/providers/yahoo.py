@@ -31,6 +31,7 @@ from ml4t.data.core.exceptions import (
     DataNotAvailableError,
     DataValidationError,
     NetworkError,
+    RateLimitError,
     SymbolNotFoundError,
 )
 from ml4t.data.providers.base import BaseProvider
@@ -51,6 +52,22 @@ def _chunks(lst: list[Any], n: int) -> Iterator[list[Any]]:
     """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
+
+
+def _drop_priceless_rows(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop bars that carry no price at all.
+
+    From the US close until Yahoo consolidates the daily bar, ``yf.download`` returns a
+    final row for the current exchange date with volume and null OHLC. It is not a
+    session: keeping it writes null prices into storage and into everything derived from
+    them. A row with prices and zero volume is a real halted session and is kept.
+    """
+    price_columns = ("open", "high", "low", "close")
+    present = [column for column in price_columns if column in df.columns]
+    if not present:
+        return df
+    has_price = pl.any_horizontal(pl.col(column).is_not_null() for column in present)
+    return df.filter(has_price)
 
 
 class YahooFinanceProvider(BaseProvider):
@@ -158,6 +175,9 @@ class YahooFinanceProvider(BaseProvider):
         Raises:
             DataNotAvailableError: If no data available for the period
             DataValidationError: If data format is invalid
+            RateLimitError: If Yahoo throttled the request. Retryable, and
+                :meth:`BaseProvider.fetch_ohlcv` does retry it.
+            SymbolNotFoundError: If the symbol is unknown to Yahoo
         """
         interval = self.FREQUENCY_MAP.get(frequency.lower(), "1d")
 
@@ -185,19 +205,29 @@ class YahooFinanceProvider(BaseProvider):
             )
 
             if df_pandas.empty:
+                df_pandas = self._resolve_empty_download(
+                    symbol, start, end_str, interval, frequency
+                )
+
+            # Convert to Polars with symbol column
+            df = self._convert_to_polars(df_pandas, symbol)
+
+            if df.is_empty():
+                # Every row was the current session's placeholder; the window holds no bar.
                 raise SymbolNotFoundError(
                     "yahoo",
                     symbol,
                     details={"start": start, "end": end_str, "frequency": frequency},
                 )
 
-            # Convert to Polars with symbol column
-            df = self._convert_to_polars(df_pandas, symbol)
-
             logger.info("Successfully fetched data", symbol=symbol, rows=len(df))
             return df
 
-        except (DataNotAvailableError, SymbolNotFoundError):
+        # NetworkError covers RateLimitError and is listed by its base deliberately: the
+        # catch-all below converts anything unnamed into DataValidationError, which is not
+        # retryable, so a network error that fell through here would be turned into a fatal
+        # one two lines after being raised as a survivable one.
+        except (DataNotAvailableError, SymbolNotFoundError, NetworkError):
             raise
 
         except OSError as e:
@@ -211,6 +241,72 @@ class YahooFinanceProvider(BaseProvider):
                 f"Failed to fetch {symbol}: {e}",
                 details={"symbol": symbol, "error": str(e)},
             ) from e
+
+    def _resolve_empty_download(
+        self, symbol: str, start: str, end: str, interval: str, frequency: str
+    ) -> pd.DataFrame:
+        """Return the data an empty ``yf.download`` missed, or raise what actually went wrong.
+
+        ``yf.download`` reports every per-symbol failure identically. It calls
+        ``Ticker.history`` *without* ``raise_errors``, catches whatever comes back inside
+        ``_download_one``, records it on a context object local to that call, logs it, and
+        hands back an empty frame. Nothing a caller can read survives the call:
+        ``yfinance.shared._ERRORS`` is declared in yfinance 1.5.2 and never written, and
+        ``download`` has no ``raise_errors`` parameter of its own.
+
+        So an empty frame used to become ``SymbolNotFoundError`` whatever had happened, and a
+        reader who had been rate-limited was told their ticker was invalid - sent to debug the
+        one thing that was correct. The public repository's ``ch02-03`` job failed this way on
+        2026-09-11 with ``Symbol 'AAPL' not found or invalid`` while the log beneath it read
+        ``YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')``.
+
+        Asking again through the path ``download`` itself uses, this time with
+        ``raise_errors=True``, is what recovers the reason. It costs one request and only on a
+        path that has already failed. If that ask succeeds, the first result was a transient
+        miss and its data is returned rather than discarded.
+
+        Mapping a rate limit to :class:`RateLimitError` is also what makes a 429 survivable:
+        :meth:`BaseProvider.fetch_ohlcv` retries a :class:`NetworkError` whose ``retryable`` is
+        set and honours its ``retry_after``, so no separate backoff is needed here.
+
+        Args:
+            symbol: The symbol whose download came back empty
+            start: Start date in YYYY-MM-DD format
+            end: End date in YYYY-MM-DD format, already made exclusive by the caller
+            interval: yfinance interval string, as passed to the download
+            frequency: The caller's frequency name, carried into the error details
+
+        Returns:
+            The pandas DataFrame the second ask returned, when it returned one
+
+        Raises:
+            RateLimitError: Yahoo throttled the request. Retryable.
+            SymbolNotFoundError: The symbol really is unknown, or Yahoo refused it for a
+                reason it named. The reason is carried in ``details``.
+        """
+        from yfinance.exceptions import YFException, YFRateLimitError
+
+        details = {"start": start, "end": end, "frequency": frequency}
+        try:
+            recovered = yf.Ticker(symbol).history(
+                start=start,
+                end=end,
+                interval=interval,
+                auto_adjust=True,
+                actions=False,
+                raise_errors=True,
+            )
+        except YFRateLimitError as e:
+            logger.warning("Yahoo rate limited the request", symbol=symbol, error=str(e))
+            raise RateLimitError("yahoo") from e
+        except YFException as e:
+            raise SymbolNotFoundError("yahoo", symbol, details={**details, "reason": str(e)}) from e
+
+        if recovered.empty:
+            raise SymbolNotFoundError("yahoo", symbol, details=details)
+
+        logger.info("Empty download recovered on a second ask", symbol=symbol, rows=len(recovered))
+        return recovered
 
     def _convert_to_polars(self, df_pandas: pd.DataFrame, symbol: str) -> pl.DataFrame:
         """
@@ -279,6 +375,7 @@ class YahooFinanceProvider(BaseProvider):
                 pl.col("volume").cast(pl.Float64),
             )
             .with_columns(pl.lit(symbol.upper()).alias("symbol"))
+            .pipe(_drop_priceless_rows)
             .select(["timestamp", "symbol", "open", "high", "low", "close", "volume"])
         )
 
@@ -587,10 +684,7 @@ class YahooFinanceProvider(BaseProvider):
                     ]
                 )
 
-                # Drop rows where all OHLCV are null (symbol had no data for that date)
-                df_symbol = df_symbol.filter(
-                    pl.col("close").is_not_null() | pl.col("open").is_not_null()
-                )
+                df_symbol = _drop_priceless_rows(df_symbol)
 
                 if len(df_symbol) > 0:
                     records.append(df_symbol)
