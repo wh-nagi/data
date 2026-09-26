@@ -1,10 +1,10 @@
-"""Integration tests for Massive/Polygon provider (real API calls).
+"""Integration tests for the Massive provider (real API calls).
 
 These tests verify the Massive provider works correctly with actual API calls.
 
 Requirements:
     - MASSIVE_API_KEY or POLYGON_API_KEY environment variable must be set
-    - Free tier: 5 requests/minute (tests respect rate limits)
+    - An account plan that permits the requested datasets
     - API key from: https://massive.com/
 
 Test Coverage:
@@ -216,6 +216,31 @@ class TestMassiveProvider:
 # class TestPolygonUpdater:
 #     """Test Polygon updater with real API calls."""
 #     ... (all updater tests commented out)
+
+
+class TestMassiveFinancials:
+    """Financial statements endpoints (Stocks Advanced or Financials & Ratios expansion)."""
+
+    def test_fetch_quarterly_income_statement(self, provider):
+        frame = provider.fetch_financials("AAPL", statement="income", period="quarterly", limit=2)
+
+        assert frame["period_end"].n_unique() == 2
+        assert "revenue" in frame["line_item"].to_list()
+        assert frame["filed_at"].null_count() == 0
+        assert frame["fiscal_period"].str.starts_with("Q").all()
+
+    def test_fetch_annual_balance_sheet(self, provider):
+        frame = provider.fetch_financials("AAPL", statement="balance", period="annual", limit=1)
+
+        assert frame["period_end"].n_unique() == 1
+        assert "total_assets" in frame["line_item"].to_list()
+        assert set(frame["fiscal_period"]) == {"FY"}
+
+    def test_fetch_company_metrics_is_dated(self, provider):
+        frame = provider.fetch_company_metrics("AAPL")
+
+        assert "market_cap" in frame["metric"].to_list()
+        assert frame["as_of"].null_count() == 0
 
 
 if __name__ == "__main__":

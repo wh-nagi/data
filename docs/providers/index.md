@@ -2,10 +2,18 @@
 
 ML4T Data supports 20+ live and specialized data providers, plus synthetic and testing providers.
 
+For the wider vendor landscape, including sources the library does not wrap, start with
+[Market Data Sources](market_data.md) or go directly to the [equity](equities.md),
+[ETF](etfs.md), [futures](futures.md), [options](options.md), [foreign exchange](fx.md), or
+[cryptocurrency](crypto.md) reference. Separate references cover [fixed income](fixed_income.md),
+[macroeconomic data](macro.md), [fundamentals](fundamentals.md),
+[alternative data](alternative_data.md), [research factors](factors.md), and
+[prediction markets](prediction_markets.md).
+
 ## Provider Comparison
 
-| Provider | Asset Class | Free Tier | Async | API Key |
-|----------|-------------|-----------|-------|---------|
+| Provider | Asset Class | Access | Async | API Key |
+|----------|-------------|--------|-------|---------|
 | [Yahoo Finance](yahoo.md) | Stocks, ETFs, Crypto | Unlimited | Thread | No |
 | [CoinGecko](coingecko.md) | Crypto | 10K+ coins | Native | No |
 | [FRED](fred.md) | Economic Data | 120/min | Thread | Yes |
@@ -21,7 +29,7 @@ ML4T Data supports 20+ live and specialized data providers, plus synthetic and t
 | [Tiingo](tiingo.md) | US Stocks | 1000/day | Thread | Yes |
 | [TwelveData](twelve_data.md) | Multi-asset | 800/day | Native | Yes |
 | [DataBento](databento.md) | Futures, Options | Free metadata; metered history | Thread | Yes |
-| [Massive](massive.md) | Multi-asset | Free tier | Thread | Yes |
+| [Massive](massive.md) | Multi-asset | Account-dependent | Thread | Yes |
 | [Finnhub](finnhub.md) | US quotes; premium OHLCV | 60 requests/minute | Thread | Yes |
 | [Binance](binance.md) | Crypto | Unlimited | Native | No |
 | [OKX](okx.md) | Crypto Perpetuals | No geo-limits | Native | No |
@@ -78,8 +86,10 @@ provider's capabilities before passing it to `DataManager` or `async_batch_load(
 | Futures and options | Databento, Massive |
 | Cryptocurrency | Binance, Binance Public, OKX, CoinGecko, CryptoCompare |
 | Foreign exchange | Oanda, Twelve Data, FXMacroData |
-| Economic series | FRED, FXMacroData |
-| Academic factors | Fama-French, AQR |
+| Economic series | FRED, FXMacroData; external official sources are compared in [Macroeconomic Data Sources](macro.md) |
+| Academic factors | Fama-French, AQR; external libraries are compared in [Research Factor Data Sources](factors.md) |
+| Prediction markets | Kalshi, Polymarket; external markets are compared in [Prediction-Market Data Sources](prediction_markets.md) |
+| Equity fundamentals | Yahoo Finance, EODHD, Finnhub, Massive; other vendors and the SEC routes are compared in [Fundamental Data Sources](fundamentals.md) |
 
 Provider access, coverage, retention, and redistribution terms can differ by account tier. Confirm
 the provider page and the provider's current terms before selecting it for a production dataset.
