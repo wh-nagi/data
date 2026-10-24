@@ -29,6 +29,7 @@ from ml4t.data.managers.fetch_manager import FetchManager
 from ml4t.data.managers.metadata_manager import MetadataManager
 from ml4t.data.managers.provider_manager import ProviderManager, ProviderRouter
 from ml4t.data.managers.storage_manager import StorageManager
+from ml4t.specs import UNSET_CALENDAR, CalendarUnset
 
 logger = structlog.get_logger()
 
@@ -338,7 +339,9 @@ class DataManager:
         bar_type: str = "time",
         bar_threshold: int | None = None,
         exchange: str = "UNKNOWN",
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        *,
+        feed_spec: Any | None = None,
     ) -> str:
         """Load data from provider and store it."""
         if not self._storage_manager:
@@ -356,6 +359,7 @@ class DataManager:
             bar_threshold,
             exchange,
             calendar,
+            feed_spec=feed_spec,
         )
 
     def import_data(
@@ -368,7 +372,9 @@ class DataManager:
         bar_type: str = "time",
         bar_threshold: int | None = None,
         exchange: str = "UNKNOWN",
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        *,
+        feed_spec: Any | None = None,
     ) -> str:
         """Import external data into storage with metadata."""
         if not self._storage_manager:
@@ -385,6 +391,7 @@ class DataManager:
             bar_threshold,
             exchange,
             calendar,
+            feed_spec=feed_spec,
         )
 
     def update(
@@ -393,11 +400,15 @@ class DataManager:
         frequency: str = "daily",
         asset_class: str = "equities",
         lookback_days: int = 7,
-        fill_gaps: bool = True,
+        fill_gaps: bool | None = None,
         provider: str | None = None,
         initial_start: str | None = None,
         initial_end: str | None = None,
         initial_load_days: int = 365,
+        *,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        feed_spec: Any | None = None,
+        check_gaps: bool = True,
     ) -> str:
         """Update existing data with incremental fetch."""
         if not self._storage_manager:
@@ -414,6 +425,9 @@ class DataManager:
             initial_start,
             initial_end,
             initial_load_days,
+            calendar=calendar,
+            feed_spec=feed_spec,
+            check_gaps=check_gaps,
         )
 
     # ========================================================================
@@ -453,51 +467,30 @@ class DataManager:
         self,
         df: pl.DataFrame,
         exchange: str | None = None,
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
         bar_frequency: Literal["auto", "daily", "intraday"] = "auto",
+        *,
+        feed_spec: Any | None = None,
     ) -> pl.DataFrame:
         """Assign sessions to daily period labels or intraday timestamps."""
-        if not self._metadata_manager:
-            # Fall back to direct implementation
-            from ml4t.data.sessions import SessionAssigner
-
-            if calendar is None:
-                if exchange is None:
-                    raise ValueError("Must provide either exchange or calendar parameter")
-                assigner = SessionAssigner.from_exchange(exchange)
-            else:
-                assigner = SessionAssigner(calendar)
-            return assigner.assign_sessions(df, bar_frequency=bar_frequency)
-
-        return self._metadata_manager.assign_sessions(df, exchange, calendar, bar_frequency)
+        manager = self._metadata_manager or MetadataManager(None)
+        return manager.assign_sessions(df, exchange, calendar, bar_frequency, feed_spec=feed_spec)
 
     def complete_sessions(
         self,
         df: pl.DataFrame,
         exchange: str | None = None,
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
         fill_gaps: bool = True,
-        fill_method: str = "forward",
-        zero_volume: bool = True,
+        fill_method: str = "none",
+        zero_volume: bool = False,
+        *,
+        feed_spec: Any | None = None,
     ) -> pl.DataFrame:
-        """Complete sessions by filling gaps."""
-        if not self._metadata_manager:
-            # Fall back to direct implementation
-            from ml4t.data.sessions import SessionCompleter
-            from ml4t.data.sessions.assigner import EXCHANGE_CALENDARS
-
-            if calendar is None:
-                if exchange is None:
-                    raise ValueError("Must provide either exchange or calendar parameter")
-                calendar = EXCHANGE_CALENDARS.get(exchange.upper())
-                if not calendar:
-                    raise ValueError(f"Unknown exchange '{exchange}'")
-
-            completer = SessionCompleter(calendar)
-            return completer.complete_sessions(df, fill_method=fill_method, zero_volume=zero_volume)
-
-        return self._metadata_manager.complete_sessions(
-            df, exchange, calendar, fill_gaps, fill_method, zero_volume
+        """Expose absent minute positions as nulls without inventing market values."""
+        manager = self._metadata_manager or MetadataManager(None)
+        return manager.complete_sessions(
+            df, exchange, calendar, fill_gaps, fill_method, zero_volume, feed_spec=feed_spec
         )
 
     # ========================================================================
@@ -554,10 +547,21 @@ class DataManager:
         if self._storage_manager:
             self._storage_manager._report_progress(message, progress)
 
-    def _validate_data(self, df: pl.DataFrame, symbol: str, asset_class: str = "equity") -> Any:
+    def _validate_data(
+        self,
+        df: pl.DataFrame,
+        symbol: str,
+        asset_class: str = "equity",
+        *,
+        frequency: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        feed_spec: Any | None = None,
+    ) -> Any:
         """Validate data (backward compatibility)."""
         if self._storage_manager:
-            return self._storage_manager._validate_data(df, symbol, asset_class)
+            return self._storage_manager._validate_data(
+                df, symbol, asset_class, frequency=frequency, calendar=calendar, feed_spec=feed_spec
+            )
         return None
 
     def _merge_data(self, existing: pl.DataFrame, new: pl.DataFrame) -> pl.DataFrame:

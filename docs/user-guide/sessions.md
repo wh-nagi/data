@@ -10,9 +10,9 @@ dependency is included with the package.
 
 ## Assign Session Dates
 
-`SessionAssigner` requires a Polars `Datetime` column named `timestamp`. Naive timestamps are
-interpreted as UTC; timezone-aware timestamps are converted to UTC before they are matched to a
-schedule.
+`SessionAssigner` accepts Polars `Datetime` instants or `Date` session labels in `timestamp`.
+Naive instants use UTC unless the feed declares a timezone; timezone-aware instants are matched in
+UTC. Ambiguous or nonexistent local times fail rather than being guessed.
 
 ```python
 from datetime import datetime
@@ -55,6 +55,40 @@ fall within an open interval:
 Set `bar_frequency="daily"` when timestamps are daily labels. The default, `"auto"`, treats a
 series as daily when every non-null timestamp is midnight.
 
+Explicit `FeedSpec.timestamp_semantics` overrides these heuristics: `session_label` preserves the
+civil label date, `event_time` matches an instant, and `bar_close` matches the ending bar boundary.
+Event intervals include the open and exclude the close; close-labeled bars exclude the open and
+include the close. The corresponding boundaries apply to lunch breaks and declared calendar
+interruptions. An explicit `bar_label` also selects the declared side; `event_time` alone does not
+infer a bar side. This assignment does
+not validate intraday grid completeness.
+
+`session_start_time` is retained in metadata, but these schedule adapters reject a non-null override.
+Register and select an authoritative calendar with the required intervals instead of silently
+replacing a named exchange's session boundaries.
+
+```python
+from ml4t.specs import FeedSpec
+
+feed = FeedSpec(calendar="24/7", timestamp_semantics="event_time", time_contract_version=2)
+assigned = SessionAssigner(feed_spec=feed).assign_sessions(bars)
+unchanged = SessionAssigner(calendar=None).assign_sessions(bars)
+```
+
+Use the canonical `calendar` keyword on constructors and facade methods. Explicit selection wins
+over feed metadata, then NYSE applies. Explicit `None` returns observations unchanged, without
+adding a session column or reconstructing a continuous grid. `calendar="24/7"` remains a real
+schedule, including an event exactly at midnight in the new day's session. Unknown names fail.
+The positional calendar argument, `calendar_name` constructor keyword and explicit `exchange`
+selector remain compatibility forms; contradictory explicit selectors raise an error. Descriptive
+exchange identity in feed metadata does not select a calendar.
+
+Data's `Metadata` supports the same versioned temporal declaration. Version 1 retains legacy null
+inheritance; version 2 preserves omitted calendar versus explicit null through JSON, copying and
+shared FeedSpec projection. Use `model_dump(mode="json")` before a YAML writer, and ordinary
+`model_dump_json()` for JSON; do not deliberately exclude null fields when preserving a disable
+declaration. Declared timezone, timestamp semantics and fixed-grid fields survive these bridges.
+
 ## Select an Exchange Calendar
 
 `SessionAssigner.from_exchange()` recognizes these exchange codes:
@@ -80,10 +114,35 @@ assigner = SessionAssigner("CME Globex Crypto")
 Calendar names and schedules can change upstream. Check the installed calendar before assigning a
 large dataset.
 
-## Complete Minute Sessions
+### CME Crypto and Spot Crypto
 
-`SessionCompleter` expands minute bars to the exchange schedule. It requires `timestamp`, `open`,
-`high`, `low`, `close`, and `volume`. The result adds `session_date` and `is_imputed`.
+`CME` selects CME Globex cryptocurrency futures and options, not all CME products and not
+spot-quoted futures. Data preserves the upstream historical schedule through May 29, 2026. After
+that day's 16:00-16:30 Chicago maintenance, trading includes weekends and holidays. Regular Globex
+maintenance is Monday-Friday 16:00-16:02 Chicago time and Saturday 02:00-04:00. Pre-open periods
+are not trading intervals. See the [CME crypto FAQ](https://www.cmegroup.com/articles/faqs/frequently-asked-questions-cryptocurrency-futures.html)
+and [launch notice](https://cmegroupclientsite.atlassian.net/wiki/spaces/EPICSANDBOX/pages/1283194884/Cryptocurrency+Futures+and+Options+Migration+to+24-7+Trading).
+
+CME observations retain the following business trade date across weekends and holidays, rather
+than acquiring a separate Saturday or Sunday label. Data uses the upstream `CME_TradeDate`
+business calendar, qualified against CME's
+[2026 reporting calendar](https://www.cmegroup.com/content/dam/cmegroup/notices/market-regulation/2026/01/msn01-09-2026revisedholidayprocessinglargetrader2026.pdf).
+Schedule queries include the next business date when needed; a Saturday observation can therefore
+map to Monday, or Tuesday after Labor Day. Assignment and completion share these intervals and
+exclude maintenance. The adapter does not change the upstream calendar registry or other products.
+
+Ordinary spot crypto uses `calendar="24/7"`, with civil-day labels and no CME maintenance. Explicit
+`calendar=None` disables session handling instead. Select the schedule from the feed's actual
+market, not from its symbol or asset-class name.
+
+<a id="complete-minute-sessions"></a>
+
+## Inspect a Nullable Minute Grid
+
+`SessionCompleter` optionally expands a timestamped series to scheduled minutes for inspection.
+Missing positions have null market values; they are not recovered observations. It requires a
+Datetime `timestamp` column and retains supplied value columns. The result adds `session_date` and
+the legacy `is_imputed` marker, which identifies null placeholder rows.
 
 ```python
 from ml4t.data.sessions import SessionCompleter
@@ -91,17 +150,29 @@ from ml4t.data.sessions import SessionCompleter
 completer = SessionCompleter("NYSE")
 complete = completer.complete_sessions(
     bars,
-    fill_method="forward",
-    zero_volume=True,
+    fill_method="none",
+    zero_volume=False,
 )
 ```
 
-The supported fill methods are `"forward"`, `"backward"`, and `"none"`. Forward and backward
-filling apply only within a session. `zero_volume=True` sets volume to zero for inserted rows.
+Only `fill_method="none"` and `zero_volume=False` are supported. Requests to copy prices or invent
+zero volume fail clearly. Observed nulls and all other original values remain unchanged.
+Use the [disk gap report](incremental-updates.md#inspect-missing-observations-on-disk) when only a list
+of missing observations is needed; it does not expand the data.
 
 Session completion rejects duplicate or non-minute-aligned timestamps and observations outside the
-selected schedule. Use session assignment first when you need to inspect how individual timestamps
-map to the exchange calendar.
+selected schedule. Lunch breaks and declared calendar interruptions are excluded from the template;
+completion never inserts rows for those closures. Use session assignment first to inspect how
+timestamps map to the exchange calendar.
+
+Completion remains a one-minute, open-labeled operation, not a general bar-grid validator. Explicit
+close-labeled or session-label metadata is rejected. `calendar=None` returns the input unchanged.
+Declared event-count bar types and frequencies other than one minute are also rejected.
+General bar-grid anchor/partial-bar policies are preserved as metadata but explicitly rejected by
+this native minute completer; they are not silently approximated by its legacy minute template.
+`DataManager.complete_sessions(fill_gaps=False)` performs assignment only and never expands rows,
+whether or not storage is configured. Feed declarations are accepted through the facade's
+`feed_spec` keyword with the same precedence as the low-level classes.
 
 ## Use Session Dates in Validation
 

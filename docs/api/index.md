@@ -1,6 +1,6 @@
 # API Reference
 
-Complete API documentation for the `ml4t-data` library, auto-generated from
+API documentation for the `ml4t-data` library, generated from
 source docstrings via [mkdocstrings](https://mkdocstrings.github.io/).
 
 ---
@@ -55,11 +55,34 @@ key = manager.update("AAPL")
 
 ---
 
+## Acquisition compatibility
+
+The opt-in `ml4t.data.compat.empyrical` module adapts acquisition, CSV caches and paths only.
+Analytical Empyrical replacements belong in Diagnostic. No legacy package is a Data runtime
+dependency. See the [migration workflow](../getting-started/migration.md#empyrical-acquisition-utilities)
+and [FRED](../providers/fred.md), [Fama-French](../providers/fama_french.md) and
+[Yahoo](../providers/yahoo.md) provider contracts.
+
+::: ml4t.data.compat.empyrical
+    options:
+      show_source: false
+      heading_level: 3
+      members:
+        - get_fama_french
+        - load_portfolio_risk_factors
+        - get_treasury_yield
+        - get_symbol_returns_from_yahoo
+        - default_returns_func
+        - get_returns_cached
+        - cache_dir
+        - data_path
+        - ensure_directory
+
 ## Storage
 
 ### StorageConfig
 
-Dataclass configuring the storage backend. Controls partitioning strategy,
+Validated configuration for the storage backend. Controls partitioning strategy,
 compression, locking, and metadata tracking.
 
 ```python
@@ -106,8 +129,8 @@ implement this contract.
 
 ### HiveStorage
 
-Hive-partitioned storage with configurable time-based partitioning. Delivers
-7x query performance improvement for time-range queries via partition pruning.
+Hive-partitioned storage with configurable time-based partitioning and
+time-range partition pruning.
 
 ```python
 from ml4t.data.storage import HiveStorage, StorageConfig
@@ -420,3 +443,164 @@ ML4TDataError
     options:
       show_source: false
       heading_level: 4
+
+## Futures Expiry Rolls
+
+`TimeBasedRoll` selects the nearest available contract until its configured pre-expiry trigger.
+`FirstNoticeDateRoll` delegates the same calendar selection while retaining its existing
+first-notice offset convention and five-session cash-settled fallback.
+
+| Mode | Offset units | Calendar behavior |
+|------|--------------|-------------------|
+| `use_business_days=True` (default) | Authoritative sessions strictly before expiration | Explicit `calendar`, then `feed_spec`, then NYSE |
+| `use_business_days=False` | Elapsed civil days | No session counting; an explicitly disabled calendar is allowed |
+| Session-count mode with `calendar=None` | Unsupported observation-based expiry offset | Raises clearly; does not substitute NYSE or 24/7 |
+
+The legacy `use_business_days` name now counts the selected exchange's sessions rather than
+weekdays. `calendar="24/7"` counts a real continuous schedule. Contract exchange identity does not
+select a calendar. Pass the feed declaration explicitly when constructing a roll strategy from
+stored metadata. Named calendars are validated before selection.
+
+An offset of zero uses expiration itself. A missing scheduled trigger does not move the trigger
+backward to an observed date: selection switches at the first eligible later observation, subject
+to the existing contract availability and paired-price checks. Explicit elapsed-day mode also
+stops snapping its target backward. Neither mode reinterprets missing data as a closure or changes
+elapsed days into row counts.
+
+::: ml4t.data.futures.roll.TimeBasedRoll
+    options:
+      show_source: false
+      heading_level: 3
+      members:
+        - __init__
+        - select_contracts
+
+::: ml4t.data.futures.roll.FirstNoticeDateRoll
+    options:
+      show_source: false
+      heading_level: 3
+      members:
+        - __init__
+        - select_contracts
+
+## Versioned individual-contract inputs
+
+`prepare_futures_inputs` prepares individual bars, dated definitions, independently available
+volume/OI facts, one current selection per root/venue and paired source roll marks. It does not
+execute a continuous series or infer fills, margin or settlement. See the
+[offline migration recipe](../getting-started/migration.md#prepare-individual-futures-inputs).
+
+::: ml4t.data.futures.prepare_futures_inputs
+    options:
+      show_source: false
+      heading_level: 4
+
+::: ml4t.data.futures.FuturesInputs
+    options:
+      show_source: false
+      heading_level: 4
+
+## Price-table representations
+
+Convert one price field between native long observations and a pandas clock-by-asset panel.
+The functions preserve supplied values and missing cells; they do not fill prices, infer
+availability or calculate returns. Other observation fields remain in the original table.
+The panel's attrs retain the declared feed, source dtypes and sparse presence information.
+Default metadata supports pandas Parquet round trips; caller-supplied provenance must also be
+JSON-serializable to use pandas' metadata export.
+
+See the [offline migration recipe](../getting-started/migration.md#move-a-long-price-table-to-a-pandas-analytical-panel)
+for required input columns, mapping conflicts and the qualified consumer versions.
+
+::: ml4t.data.utils.conversion.to_price_panel
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.utils.conversion.from_price_panel
+    options:
+      show_source: false
+      heading_level: 3
+
+## Corporate-action input preparation
+
+Validate versioned source facts or apply supplied per-observation factors without changing the
+existing split/dividend kernels. Source facts do not mutate broker positions or cash. Unavailable
+terms remain explicit; requesting missing applicable terms fails before output.
+
+See the [offline action migration recipe](../getting-started/migration.md#import-corporate-action-facts-without-changing-their-financial-definition)
+for ratio direction, required source fields and native versus vendor adjustment definitions.
+
+::: ml4t.data.adjustments.prepare_action_inputs
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.adjustments.apply_adjustment_factors
+    options:
+      show_source: false
+      heading_level: 3
+
+## Dated identity and known-at history inputs
+
+Use captured identity intervals and source availability for preparation,not an asset database or
+runtime history request. The [offline dated-history recipe](../getting-started/migration.md#prepare-dated-identities-and-known-at-history)
+shows symbol normalization,pre-entry observations and actual source revisions.
+
+::: ml4t.data.assets.InstrumentRegistry
+    options:
+      show_source: false
+      heading_level: 3
+      members:
+        - from_frame
+        - resolve
+        - lifetimes
+        - identities
+        - memberships
+
+::: ml4t.data.adjustments.prepare_adjusted_history
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.adjustments.AdjustedHistory
+    options:
+      show_source: false
+      heading_level: 3
+
+## Portable input capture
+
+Capture selected tables and caller-declared effective configuration, then verify all members before
+returning reconstructed native frames. See the [storage contract](../user-guide/storage.md#portable-input-snapshots)
+and [migration recipe](../getting-started/migration.md#reconstruct-inputs-after-source-pruning).
+Optional bundle exchange uses standard Zipline readers/writers only in the conversion environment.
+
+::: ml4t.data.storage.SnapshotTable
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.storage.InputSnapshot
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.storage.export_snapshot
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.storage.read_snapshot
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.compat.zipline.export_bundle
+    options:
+      show_source: false
+      heading_level: 3
+
+::: ml4t.data.compat.zipline.make_bundle_ingest
+    options:
+      show_source: false
+      heading_level: 3

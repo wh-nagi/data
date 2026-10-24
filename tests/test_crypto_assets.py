@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
+import pytest
 
 from ml4t.data.assets import AssetClass, AssetInfo, AssetSchema, AssetValidator
 from ml4t.data.assets.asset_class import (
@@ -10,7 +11,50 @@ from ml4t.data.assets.asset_class import (
     normalize_crypto_symbol,
     parse_crypto_symbol,
 )
-from ml4t.data.calendar.crypto import CryptoCalendar
+from ml4t.data.calendar.crypto import CryptoCalendar, CryptoSessionValidator
+from ml4t.data.providers import SyntheticProvider
+from ml4t.specs import FeedSpec
+
+
+@pytest.fixture(params=["direct", "asset"])
+def continuity_issues(request):
+    def validate(frame, frequency):
+        feed = FeedSpec(
+            time_contract_version=2,
+            calendar="24/7",
+            data_frequency=frequency,
+            timestamp_semantics="session_label" if frequency == "daily" else "event_time",
+            bar_grid_anchor=None if frequency == "daily" else "session_open",
+            bar_label=None if frequency == "daily" else "left",
+            partial_bar_policy=None if frequency == "daily" else "exclude",
+        )
+        if request.param == "direct":
+            return CryptoSessionValidator(feed_spec=feed).validate_continuity(frame, frequency)
+        info = AssetInfo(symbol="BTC/USD", asset_class=AssetClass.CRYPTO)
+        return AssetValidator(info, feed_spec=feed).validate(frame, frequency).get("continuity", [])
+
+    return validate
+
+
+@pytest.mark.parametrize("frequency", ["minute", "hourly"])
+def test_seven_monday_bars_do_not_imply_a_missing_weekend(continuity_issues, frequency):
+    with SyntheticProvider(calendar_mode="continuous") as provider:
+        frame = provider.fetch_ohlcv("BTCUSD", "2025-07-07", "2025-07-07", frequency).head(7)
+    assert continuity_issues(frame, frequency) == []
+
+
+def test_real_missing_crypto_weekend_remains_a_continuity_gap(continuity_issues):
+    with SyntheticProvider(calendar_mode="continuous") as provider:
+        frame = provider.fetch_ohlcv("BTCUSD", "2025-07-07", "2025-07-15", "daily")
+    frame = frame.filter(pl.col("timestamp").dt.weekday() <= 5)
+    issues = continuity_issues(frame, "daily")
+    assert any("Gap detected: 2025-07-11" in issue and "72.0 hours" in issue for issue in issues)
+
+
+def test_complete_crypto_week_has_no_continuity_gap(continuity_issues):
+    with SyntheticProvider(calendar_mode="continuous") as provider:
+        frame = provider.fetch_ohlcv("BTCUSD", "2025-07-07", "2025-07-13", "daily")
+    assert continuity_issues(frame, "daily") == []
 
 
 class TestCryptoCalendar:

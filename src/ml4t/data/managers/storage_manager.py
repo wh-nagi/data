@@ -19,13 +19,26 @@ from pydantic import ValidationError
 from tenacity import RetryError
 
 from ml4t.data.core.schemas import align_frames_for_concat, timestamp_bounds
+from ml4t.data.sessions.assigner import SessionAssigner
 from ml4t.data.storage.backend import normalize_storage_metadata
 from ml4t.data.utils.conversion import pandas_to_polars
+from ml4t.specs import UNSET_CALENDAR, CalendarUnset, FeedSpec
 
 if TYPE_CHECKING:
     from ml4t.data.managers.fetch_manager import FetchManager
 
 logger = structlog.get_logger()
+
+_TEMPORAL_FIELDS = (
+    "calendar",
+    "time_contract_version",
+    "timezone",
+    "timestamp_semantics",
+    "session_start_time",
+    "bar_grid_anchor",
+    "bar_label",
+    "partial_bar_policy",
+)
 
 
 class StorageManager:
@@ -82,6 +95,10 @@ class StorageManager:
         df: pl.DataFrame,
         symbol: str,
         asset_class: str = "equity",
+        *,
+        frequency: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        feed_spec: Any | None = None,
     ) -> Any:
         """Validate data using OHLCV and cross-validation.
 
@@ -93,7 +110,6 @@ class StorageManager:
         Returns:
             ValidationReport with results
         """
-        from ml4t.data.assets.asset_class import AssetClass
         from ml4t.data.validation import OHLCVValidator, ValidationReport
         from ml4t.data.validation.cross_validation import CrossValidator
         from ml4t.data.validation.rules import ValidationRulePresets
@@ -101,7 +117,10 @@ class StorageManager:
         report = ValidationReport(symbol=symbol, provider="unknown")
 
         rules = ValidationRulePresets.for_asset_class(asset_class)
-        is_crypto = rules.asset_class == AssetClass.CRYPTO
+        if calendar is UNSET_CALENDAR:
+            calendar = rules.calendar
+        if feed_spec is None:
+            feed_spec = rules
 
         # Run OHLCV validation
         ohlcv_validator = OHLCVValidator(
@@ -128,10 +147,11 @@ class StorageManager:
             check_market_hours=rules.check_market_hours,
             volume_spike_threshold=rules.volume_spike_threshold,
             price_gap_threshold=rules.price_gap_threshold,
-            is_crypto=is_crypto,
+            calendar=calendar,
+            feed_spec=feed_spec,
         )
 
-        result = cross_validator.validate(df)
+        result = cross_validator.validate(df, frequency=frequency)
         report.add_result(result, "CrossValidator")
 
         return report
@@ -181,6 +201,39 @@ class StorageManager:
             return pandas_to_polars(df)
         return df
 
+    @staticmethod
+    def _ingestion_feed(
+        calendar: str | None | CalendarUnset,
+        feed_spec: Any | None,
+        frequency: str,
+        bar_type: str,
+    ) -> tuple[FeedSpec, dict[str, Any]]:
+        source = normalize_storage_metadata(feed_spec) if isinstance(feed_spec, dict) else feed_spec
+        feed = (
+            FeedSpec.from_any(source) if source is not None else FeedSpec(time_contract_version=2)
+        )
+        aliases = {
+            "hour": "hourly",
+            "1h": "hourly",
+            "1hour": "hourly",
+            "1d": "daily",
+            "1day": "daily",
+            "1m": "minute",
+            "1min": "minute",
+            "1minute": "minute",
+        }
+        requested = aliases.get(frequency.lower(), frequency.lower())
+        declared = str(feed.data_frequency).lower()
+        if feed.data_frequency is not None and aliases.get(declared, declared) != requested:
+            raise ValueError("feed data_frequency must match the requested frequency")
+        if feed.bar_type not in (None, bar_type):
+            raise ValueError("feed bar_type must match the requested bar_type")
+        if calendar is not UNSET_CALENDAR:
+            feed = feed.with_overrides(calendar=calendar, time_contract_version=2)
+        SessionAssigner(feed_spec=feed)
+        wire = feed.to_dict()
+        return feed, {name: wire[name] for name in _TEMPORAL_FIELDS if name in wire}
+
     def load(
         self,
         symbol: str,
@@ -192,7 +245,9 @@ class StorageManager:
         bar_type: str = "time",
         bar_threshold: int | None = None,
         exchange: str = "UNKNOWN",
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        *,
+        feed_spec: Any | None = None,
     ) -> str:
         """Load data from provider and store it.
 
@@ -217,6 +272,8 @@ class StorageManager:
         if not self.storage:
             raise ValueError("Storage not configured")
 
+        feed, temporal_values = self._ingestion_feed(calendar, feed_spec, frequency, bar_type)
+
         logger.info(
             "Starting data load",
             symbol=symbol,
@@ -240,9 +297,13 @@ class StorageManager:
             logger.info(f"Fetched {len(df)} rows of data")
             self._report_progress(f"Fetched {len(df)} rows", 0.5)
 
+            min_ts, max_ts = timestamp_bounds(df)
+
             # Validate data if enabled
             if self.enable_validation:
-                validation_report = self._validate_data(df, symbol, asset_class)
+                validation_report = self._validate_data(
+                    df, symbol, asset_class, frequency=frequency, feed_spec=feed
+                )
                 if not validation_report.passed:
                     logger.warning(
                         "Data validation issues found",
@@ -254,8 +315,6 @@ class StorageManager:
 
             # Create metadata
             from ml4t.data.core.models import DataObject, Metadata
-
-            min_ts, max_ts = timestamp_bounds(df)
 
             bar_params = {}
             if bar_type == "time":
@@ -270,7 +329,7 @@ class StorageManager:
                 bar_type=bar_type,
                 bar_params=bar_params,
                 exchange=exchange,
-                calendar=calendar,
+                **temporal_values,
                 start_date=min_ts,
                 end_date=max_ts,
                 last_updated=datetime.now(UTC),
@@ -317,7 +376,9 @@ class StorageManager:
         bar_type: str = "time",
         bar_threshold: int | None = None,
         exchange: str = "UNKNOWN",
-        calendar: str | None = None,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        *,
+        feed_spec: Any | None = None,
     ) -> str:
         """Import external data into storage with metadata.
 
@@ -341,6 +402,8 @@ class StorageManager:
         if not self.storage:
             raise ValueError("Storage not configured")
 
+        feed, temporal_values = self._ingestion_feed(calendar, feed_spec, frequency, bar_type)
+
         logger.info(
             "Importing external data",
             symbol=symbol,
@@ -360,9 +423,13 @@ class StorageManager:
             if missing:
                 raise ValueError(f"Missing required columns: {missing}")
 
+            min_ts, max_ts = timestamp_bounds(df)
+
             # Validate data if enabled
             if self.enable_validation:
-                validation_report = self._validate_data(df, symbol, asset_class)
+                validation_report = self._validate_data(
+                    df, symbol, asset_class, frequency=frequency, feed_spec=feed
+                )
                 if not validation_report.passed:
                     logger.warning(
                         "Imported data has validation issues",
@@ -372,8 +439,6 @@ class StorageManager:
 
             # Create metadata
             from ml4t.data.core.models import DataObject, Metadata
-
-            min_ts, max_ts = timestamp_bounds(df)
 
             bar_params = {}
             if bar_type == "time":
@@ -388,7 +453,7 @@ class StorageManager:
                 bar_type=bar_type,
                 bar_params=bar_params,
                 exchange=exchange,
-                calendar=calendar,
+                **temporal_values,
                 start_date=min_ts,
                 end_date=max_ts,
                 last_updated=datetime.now(UTC),
@@ -418,11 +483,15 @@ class StorageManager:
         frequency: str = "daily",
         asset_class: str = "equities",
         lookback_days: int = 7,
-        fill_gaps: bool = True,
+        fill_gaps: bool | None = None,
         provider: str | None = None,
         initial_start: str | None = None,
         initial_end: str | None = None,
         initial_load_days: int = 365,
+        *,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        feed_spec: Any | None = None,
+        check_gaps: bool = True,
     ) -> str:
         """Update existing data with incremental fetch.
 
@@ -431,7 +500,8 @@ class StorageManager:
             frequency: Data frequency
             asset_class: Asset class
             lookback_days: Days to look back for updates
-            fill_gaps: If True, detect and fill gaps in data
+            fill_gaps: Legacy False disables checks; True is rejected, never imputed.
+            check_gaps: Report calendar gaps without changing observations.
             provider: Optional provider override
             initial_start: Optional start date for first load when no data exists
             initial_end: Optional end date for first load when no data exists
@@ -443,6 +513,12 @@ class StorageManager:
         Raises:
             ValueError: If storage not configured
         """
+        if fill_gaps is True:
+            raise ValueError(
+                "Synthetic gap imputation is unsupported; inspect gaps and download source observations"
+            )
+        if fill_gaps is False:
+            check_gaps = False
         if not self.storage:
             raise ValueError("Storage not configured")
 
@@ -483,6 +559,8 @@ class StorageManager:
                     frequency=frequency,
                     asset_class=asset_class,
                     provider=provider,
+                    calendar=calendar,
+                    feed_spec=feed_spec,
                 )
 
             # Read existing data
@@ -498,6 +576,14 @@ class StorageManager:
             existing_metadata = (
                 normalize_storage_metadata(self.storage.get_metadata(key), key) or {}
             )
+            stored_bar_type = existing_metadata.get("bar_type")
+            effective_bar_type = stored_bar_type if isinstance(stored_bar_type, str) else "time"
+            effective_feed, temporal_values = self._ingestion_feed(
+                calendar,
+                existing_metadata if feed_spec is None else feed_spec,
+                frequency,
+                effective_bar_type,
+            )
             existing_provider = existing_metadata.get("provider")
             if (
                 not provider
@@ -508,6 +594,8 @@ class StorageManager:
                     f"Stored metadata provider for '{key}' must be a string, "
                     f"got {type(existing_provider).__name__}"
                 )
+            if not provider and existing_provider not in (None, "", "auto"):
+                provider = existing_provider
 
             # Get the date range from existing data
             _, last_timestamp = timestamp_bounds(existing_df)
@@ -569,16 +657,24 @@ class StorageManager:
                 added_rows=len(merged_df) - len(existing_df),
             )
 
-            # Detect and optionally fill gaps
+            # Gap checks never change observations, even outside provider history limits.
             gaps = []
-            if fill_gaps and not provider_history_limited:
+            gap_check_performed = check_gaps and effective_feed.resolve_calendar() is not None
+            if gap_check_performed:
                 self._report_progress(f"Checking for gaps in {symbol}", 0.6)
 
                 from ml4t.data.utils.gaps import GapDetector
 
-                is_crypto = asset_class.lower() == "crypto"
+                selected_calendar = effective_feed.resolve_calendar()
+                if selected_calendar is not None and effective_bar_type != "time":
+                    raise NotImplementedError("calendar gap checks require fixed time bars")
                 gap_detector = GapDetector()
-                gaps = gap_detector.detect_gaps(merged_df, frequency=frequency, is_crypto=is_crypto)
+                gaps = gap_detector.detect_gaps(
+                    merged_df,
+                    frequency=frequency,
+                    calendar=selected_calendar,
+                    feed_spec=effective_feed,
+                )
 
                 if gaps:
                     gap_summary = gap_detector.summarize_gaps(gaps)
@@ -587,16 +683,6 @@ class StorageManager:
                         gap_count=gap_summary["count"],
                         total_missing=gap_summary["total_missing_periods"],
                     )
-
-                    merged_df = gap_detector.fill_gaps(merged_df, gaps, method="forward")
-                    logger.info("Filled gaps using forward fill", final_rows=len(merged_df))
-            elif fill_gaps and provider_history_limited:
-                logger.warning(
-                    "Gap filling skipped because provider history cannot cover the missing range",
-                    provider=provider,
-                    last_timestamp=last_timestamp,
-                    resumed_at=fetch_start,
-                )
 
             self._report_progress(f"Storing updated data for {symbol}", 0.8)
 
@@ -614,7 +700,12 @@ class StorageManager:
                     # BulkManager compares this legacy field with naive local cutoffs.
                     "last_update": updated_at.astimezone().replace(tzinfo=None).isoformat(),
                     "update_type": "incremental",
-                    "gaps_filled": fill_gaps and len(gaps) > 0,
+                    "gaps_filled": False,
+                    "gap_check_performed": gap_check_performed,
+                    "gap_count": len(gaps) if gap_check_performed else None,
+                    "missing_observations": (
+                        sum(gap.missing_periods for gap in gaps) if gap_check_performed else None
+                    ),
                     "provider_history_limited": provider_history_limited,
                 }
             )
@@ -622,7 +713,11 @@ class StorageManager:
             existing_model_values = {
                 name: value
                 for name in Metadata.model_fields
-                if (value := existing_metadata.get(name)) is not None
+                if name in existing_metadata
+                and (
+                    (value := existing_metadata[name]) is not None
+                    or (name == "calendar" and existing_metadata.get("time_contract_version") == 2)
+                )
             }
             resolved_provider = (
                 provider
@@ -652,6 +747,10 @@ class StorageManager:
                 "attributes": updated_attributes,
             }
 
+            for name in _TEMPORAL_FIELDS:
+                metadata_values.pop(name, None)
+            metadata_values.update(temporal_values)
+
             try:
                 updated_metadata = Metadata.model_validate(metadata_values)
             except ValidationError as error:
@@ -660,7 +759,12 @@ class StorageManager:
                     for detail in error.errors()
                     if (location := detail.get("loc")) and isinstance(location[0], str)
                 }
-                removable_fields = invalid_fields - {"provider", "symbol", "asset_class"}
+                removable_fields = invalid_fields - {
+                    "provider",
+                    "symbol",
+                    "asset_class",
+                    *_TEMPORAL_FIELDS,
+                }
                 if not removable_fields:
                     raise
                 logger.warning(

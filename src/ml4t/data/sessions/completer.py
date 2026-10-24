@@ -1,14 +1,19 @@
-"""Session completion with gap filling for trading data.
-
-Ported from crypto-data-pipeline with enhancements for ml4t.data.
-"""
+"""Expose absent minute positions without manufacturing market observations."""
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any
 
 import polars as pl
 import structlog
+
+from ml4t.data.sessions.assigner import (
+    SessionAssigner,
+    _schedule_for_instants,
+    _session_intervals,
+)
+from ml4t.specs import UNSET_CALENDAR, BarLabel, CalendarUnset, TimestampSemantics
 
 logger = structlog.get_logger()
 
@@ -20,62 +25,51 @@ def _datetime_scalar(value: object, name: str) -> datetime:
 
 
 class SessionCompleter:
-    """Fill gaps in trading data to create complete sessions.
+    """Left join observations to scheduled minutes, retaining absent values as nulls.
 
-    For each trading session:
-    1. Generate all minute timestamps in session (e.g., 1380 for 23-hour CME sessions)
-    2. Left join with actual data
-    3. Forward fill OHLC prices from last close
-    4. Set volume=0 for filled rows
-    5. Add session_date column
-
-    Example:
-        ```python
-        completer = SessionCompleter("CME_Globex_Crypto")
-        df_complete = completer.complete_sessions(df)
-        # Now has continuous timestamps with no gaps
-        ```
+    The legacy is_imputed marker identifies placeholder rows, not fabricated prices.
+    Use the disk gap report instead when expansion into a nullable grid is unnecessary.
     """
 
-    def __init__(self, calendar_name: str):
+    def __init__(
+        self,
+        calendar: str | None | CalendarUnset = UNSET_CALENDAR,
+        *,
+        calendar_name: str | None | CalendarUnset = UNSET_CALENDAR,
+        exchange: str | None = None,
+        feed_spec: Any | None = None,
+    ) -> None:
         """Initialize with exchange calendar.
 
         Args:
-            calendar_name: Name of pandas_market_calendars calendar
-                          (e.g., "CME_Globex_Crypto", "NYSE", "NASDAQ")
+            calendar: Explicit schedule; None disables completion.
+            calendar_name: Compatibility alias.
+            exchange: Compatibility selector.
+            feed_spec: Shared temporal declaration.
         """
-        try:
-            import pandas_market_calendars as mcal
-        except ImportError:
-            raise ImportError(
-                "pandas_market_calendars is required for session completion. "
-                "Install with: pip install pandas-market-calendars"
-            )
-
-        self.calendar_name = calendar_name
-        try:
-            self.calendar = mcal.get_calendar(calendar_name)
-        except Exception as e:
-            raise ValueError(f"Unknown calendar '{calendar_name}': {e}")
-
-        logger.info(f"Initialized SessionCompleter with calendar: {calendar_name}")
+        assigner = SessionAssigner(
+            calendar, calendar_name=calendar_name, exchange=exchange, feed_spec=feed_spec
+        )
+        self.calendar_name = assigner.calendar_name
+        self.calendar = assigner.calendar
+        self.feed_spec = assigner.feed_spec
 
     def complete_sessions(
         self,
         df: pl.DataFrame,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
-        fill_method: str = "forward",
-        zero_volume: bool = True,
+        fill_method: str = "none",
+        zero_volume: bool = False,
     ) -> pl.DataFrame:
-        """Fill gaps in data to create complete trading sessions.
+        """Represent missing scheduled minutes with nulls, preserving observed values.
 
         Args:
             df: Input DataFrame with timestamp, open, high, low, close, volume
             start_date: Optional start date (auto-detected if not provided)
             end_date: Optional exclusive end date (auto-detected if not provided)
-            fill_method: Method for filling prices ("forward", "backward", "none")
-            zero_volume: If True, set volume=0 for filled rows; if False, use NaN
+            fill_method: Only "none" is supported; synthetic prices are rejected.
+            zero_volume: Must be False; an absent observation has no known volume.
 
         Returns:
             DataFrame with complete sessions, an is_imputed column, and timestamp order
@@ -85,10 +79,35 @@ class SessionCompleter:
                 not minute-aligned, multiple symbols share a timestamp, or an observation
                 falls outside a scheduled session or the requested half-open range
         """
+        if self.calendar is None:
+            return df
+        if (
+            self.feed_spec.bar_grid_anchor is not None
+            or self.feed_spec.partial_bar_policy is not None
+        ):
+            raise NotImplementedError(
+                "native minute completion does not support explicit general bar-grid policies"
+            )
+        if self.feed_spec.bar_type not in (None, "time"):
+            raise NotImplementedError("minute completion requires fixed time bars")
+        if self.feed_spec.data_frequency is not None and str(
+            self.feed_spec.data_frequency
+        ).lower() not in {"minute", "1minute", "1min", "1m"}:
+            raise ValueError("minute completion requires a declared one-minute frequency")
+        if self.feed_spec.timestamp_semantics not in (
+            None,
+            TimestampSemantics.EVENT_TIME,
+        ) or self.feed_spec.bar_label not in (None, BarLabel.LEFT):
+            raise NotImplementedError(
+                "minute completion currently requires open-labeled event_time bars"
+            )
         if "timestamp" not in df.columns:
             raise ValueError("DataFrame must have 'timestamp' column")
-        if fill_method not in {"forward", "backward", "none"}:
-            raise ValueError("fill_method must be 'forward', 'backward', or 'none'")
+        if fill_method != "none" or zero_volume:
+            raise ValueError(
+                "Synthetic price/volume imputation is unsupported; "
+                "use fill_method='none' and zero_volume=False"
+            )
 
         if df.is_empty():
             logger.warning("DataFrame is empty, cannot complete sessions")
@@ -121,11 +140,15 @@ class SessionCompleter:
             ):
                 raise ValueError("start_date and end_date must not be NaT")
             if request_start.tzinfo is None:
-                request_start = request_start.tz_localize("UTC")
+                request_start = request_start.tz_localize(
+                    self.feed_spec.timezone or "UTC"
+                ).tz_convert("UTC")
             else:
                 request_start = request_start.tz_convert("UTC")
             if request_end.tzinfo is None:
-                request_end = request_end.tz_localize("UTC")
+                request_end = request_end.tz_localize(self.feed_spec.timezone or "UTC").tz_convert(
+                    "UTC"
+                )
             else:
                 request_end = request_end.tz_convert("UTC")
             if request_start >= request_end:
@@ -136,11 +159,7 @@ class SessionCompleter:
             ):
                 raise ValueError("start_date and end_date must be minute-aligned")
 
-            start_pd = request_start.normalize() - pd.Timedelta(days=1)
-            end_pd = request_end.normalize() + pd.Timedelta(days=1)
-
-            # Get trading schedule
-            schedule = self.calendar.schedule(start_date=start_pd, end_date=end_pd)
+            schedule = _schedule_for_instants(self.calendar, request_start, request_end)
 
             if len(schedule) == 0:
                 logger.warning("No trading sessions found in date range")
@@ -155,15 +174,7 @@ class SessionCompleter:
             for session_date, row in schedule.iterrows():
                 if not isinstance(session_date, pd.Timestamp):
                     raise TypeError("calendar returned a non-datetime session label")
-                market_open = row["market_open"]
-                market_close = row["market_close"]
-                intervals = [(market_open, market_close)]
-                if "break_start" in schedule.columns and not pd.isna(row["break_start"]):
-                    intervals = [
-                        (market_open, row["break_start"]),
-                        (row["break_end"], market_close),
-                    ]
-                for interval_start, interval_end in intervals:
+                for interval_start, interval_end in _session_intervals(row):
                     clipped_start = max(interval_start, request_start)
                     clipped_end = min(interval_end, request_end)
                     if clipped_start >= clipped_end:
@@ -192,7 +203,9 @@ class SessionCompleter:
             # Ensure input data has matching timestamp type
             timestamp_expr = pl.col("timestamp")
             if timestamp_dtype.time_zone is None:
-                timestamp_expr = timestamp_expr.dt.replace_time_zone("UTC")
+                timestamp_expr = timestamp_expr.dt.replace_time_zone(
+                    self.feed_spec.timezone or "UTC"
+                )
             timestamp_expr = timestamp_expr.dt.convert_time_zone("UTC").cast(
                 pl.Datetime("ns", "UTC")
             )
@@ -234,14 +247,6 @@ class SessionCompleter:
                 pl.col("_is_observed").is_null().alias("is_imputed")
             )
 
-            # Fill missing data based on method
-            if fill_method != "none":
-                complete_df = self._fill_missing_data(
-                    complete_df,
-                    method=fill_method,
-                    zero_volume=zero_volume,
-                )
-
             complete_df = complete_df.drop("_is_observed")
             rows_added = complete_df.get_column("is_imputed").sum()
             logger.info(f"Completed sessions: added {rows_added} rows ({len(complete_df)} total)")
@@ -251,82 +256,6 @@ class SessionCompleter:
         except Exception as e:
             logger.error(f"Failed to complete sessions: {e}", exc_info=True)
             raise
-
-    def _fill_missing_data(
-        self,
-        df: pl.DataFrame,
-        method: str = "forward",
-        zero_volume: bool = True,
-    ) -> pl.DataFrame:
-        """Fill missing data with forward-filled prices and zero/NaN volume.
-
-        Strategy:
-        1. Forward/backward fill OHLC from last/next available close
-        2. Set volume=0 (or NaN) for filled rows
-        3. Preserve all other columns
-
-        Args:
-            df: DataFrame with nulls in OHLCV columns
-            method: Fill method ("forward" or "backward")
-            zero_volume: If True, use 0 for missing volume; if False, keep NaN
-
-        Returns:
-            DataFrame with filled data
-        """
-        price_columns = ["open", "high", "low", "close"]
-
-        reference_price: pl.Expr | None = None
-        reference_column = next((column for column in price_columns if column in df.columns), None)
-        if method == "forward":
-            if "close" in df.columns:
-                reference_column = "close"
-            if reference_column is not None:
-                reference_price = pl.col(reference_column).forward_fill()
-        elif method == "backward":
-            if "close" in df.columns:
-                reference_column = "close"
-            if reference_column is not None:
-                reference_price = pl.col(reference_column).backward_fill().over("session_date")
-
-        filled_df = df
-        if reference_price is not None:
-            filled_df = filled_df.with_columns(
-                *[
-                    pl.when(pl.col("is_imputed"))
-                    .then(reference_price)
-                    .otherwise(pl.col(column))
-                    .alias(column)
-                    for column in price_columns
-                    if column in df.columns
-                ]
-            )
-
-        # Handle volume
-        if "volume" in df.columns:
-            if zero_volume:
-                filled_df = filled_df.with_columns(
-                    pl.when(pl.col("is_imputed"))
-                    .then(pl.lit(0.0))
-                    .otherwise(pl.col("volume"))
-                    .alias("volume")
-                )
-            # else: keep NaN for missing volume
-
-        # Forward fill common metadata columns if present
-        metadata_columns = [
-            "instrument_id",
-            "symbol",
-            "raw_symbol",
-            "base_symbol",
-            "rtype",
-            "publisher_id",
-        ]
-
-        for col in metadata_columns:
-            if col in filled_df.columns:
-                filled_df = filled_df.with_columns(pl.col(col).forward_fill())
-
-        return filled_df
 
     def get_session_info(
         self, date_or_datetime: datetime | date

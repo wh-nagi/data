@@ -15,6 +15,7 @@ from ml4t.data.storage.backend import StorageConfig
 from ml4t.data.storage.flat import FlatStorage
 from ml4t.data.storage.hive import HiveStorage
 from ml4t.data.storage.keys import storage_key_path
+from ml4t.specs import UNSET_CALENDAR
 
 
 class TestDataManagerLoad:
@@ -258,6 +259,8 @@ class TestDataManagerUpdate:
             frequency="daily",
             asset_class="equities",
             provider="mock",
+            calendar=UNSET_CALENDAR,
+            feed_spec=None,
         )
 
     def test_update_limits_default_initial_load_to_provider_history(self, manager):
@@ -584,7 +587,7 @@ class TestDataManagerUpdate:
         key = manager.load("AAPL", "2024-01-01", "2024-01-05", provider="mock")
 
         # Update - should merge data
-        manager.update("AAPL", fill_gaps=True, provider="mock")
+        manager.update("AAPL", check_gaps=True, provider="mock")
 
         stored_df = storage.read(key).collect()
         # Should have data without duplicates
